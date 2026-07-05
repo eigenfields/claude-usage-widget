@@ -1,0 +1,21 @@
+# Claude Usage Widget - config (the only file you ever edit)
+#
+# logs_path : normally leave BLANK - the widget finds your Claude Code logs by
+#             itself (~/.claude/projects on every OS, or $CLAUDE_CONFIG_DIR).
+#             Set it only if the widget says it couldn't find them, e.g.
+#               logs_path = C:\Users\you\.claude\projects
+#
+# plan      : your subscription tier - max20x | max5x | pro
+#             Used only until your first /usage paste calibrates the gauges
+#             to your real account; after that, pastes win.
+
+logs_path =
+plan = max20x
+
+# ---------------- calibration: paste /usage output below ----------------
+# Run /usage in Claude Code, copy the WHOLE output, paste it below this line,
+# and save the file right away (the save time anchors the reading - while the
+# widget is running it picks the paste up within seconds).
+# Paste a fresh reading whenever you like: each one tightens the fit and
+# re-pins your session/weekly reset times. Overwrite the old paste or leave
+# it - readings the widget has already seen are skipped automatically.

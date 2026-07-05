@@ -1,0 +1,2 @@
+pywebview>=5.4
+tzdata; sys_platform == "win32"

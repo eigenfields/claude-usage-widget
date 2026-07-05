@@ -1,0 +1,15 @@
+# personal / runtime state — never ships
+config.txt
+points.json
+state.json
+desktop.ini
+_legacy/
+/_*.md
+
+# python
+__pycache__/
+*.pyc
+*.tmp
+
+# windows explorer droppings
+Thumbs.db
