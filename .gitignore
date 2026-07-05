@@ -3,7 +3,6 @@ config.txt
 points.json
 state.json
 desktop.ini
-_legacy/
 /_*.md
 
 # python
