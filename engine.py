@@ -28,10 +28,17 @@ CONFIG_PATH = HERE / "config.txt"
 POINTS_PATH = HERE / "points.json"
 UTC = timezone.utc
 
-# $/MTok (input, output). cache_read = 0.10*input, cache_write = 1.25*input.
+# $/MTok (input, output). cache_write = 1.25*input.
+# cache_read = 0.01*input — NOT the 0.10 API billing ratio. Re-derived
+# 2026-07-07 from 23 real /usage readings: a grid search over (cr, cw, out)
+# weights collapsed the within-session drift (implied %/$ slid 0.60->0.28 under
+# cr=0.10) and cut session fit error from RMS 2.20 to 0.57, with the weekly
+# pairs (1%..52%) as the out-of-sample check (RMS 0.84). The subscription
+# limiter charges cached context far below API price — without this, cache-
+# heavy sessions (>150k context, subagents) overstate by ~4pts mid-session.
 PRICE = {"fable": (10.0, 50.0), "opus": (5.0, 25.0),
          "sonnet": (3.0, 15.0), "haiku": (1.0, 5.0)}
-CR, CW = 0.10, 1.25
+CR, CW = 0.01, 1.25
 SESSION_HOURS = 5
 # A session block's first local request can legitimately lag its start by normal
 # think-time; only a lag beyond this marks the window soft (off-device/mid-block
@@ -45,12 +52,12 @@ FABLE_HYP = "A"   # A = Fable-5 only ; B = Opus-class. Flip once pastes decide.
 
 # Zero-paste fallback scales (% per cost-equivalent $) so the widget shows a
 # sane provisional number straight after download. Derived from one calibrated
-# Max-20x account (n=3 fit, 2026-07-04); other tiers scaled by their limit
-# ratio vs 20x (Max 5x = 1/4 the budget, Pro = 1/20). The first real /usage
-# paste replaces these with the account's own fit.
+# Max-20x account (n=11/12 fit under the CR=0.01 weights, 2026-07-07); other
+# tiers scaled by their limit ratio vs 20x (Max 5x = 1/4 the budget, Pro =
+# 1/20). The first real /usage paste replaces these with the account's own fit.
 TIER_MULT = {"max20x": 1.0, "max5x": 4.0, "pro": 20.0}
-BASE_A = {"session": 0.3995, "week_all": 0.05945,
-          "week_fable_A": 0.18183, "week_fable_B": 0.08537}
+BASE_A = {"session": 0.6681, "week_all": 0.1153,
+          "week_fable_A": 0.3365, "week_fable_B": 0.1608}
 
 CONFIG_TEMPLATE = """\
 # Claude Usage Widget - config (the only file you ever edit)
@@ -84,13 +91,17 @@ def local_tz():
     return datetime.now().astimezone().tzinfo
 
 
-def price_for(model):
+def fam_name(model):
     ml = (model or "").lower()
-    if "fable" in ml or "mythos" in ml: return PRICE["fable"]
-    if "opus" in ml:   return PRICE["opus"]
-    if "sonnet" in ml: return PRICE["sonnet"]
-    if "haiku" in ml:  return PRICE["haiku"]
+    if "fable" in ml or "mythos" in ml: return "fable"
+    if "opus" in ml:   return "opus"
+    if "sonnet" in ml: return "sonnet"
+    if "haiku" in ml:  return "haiku"
     return None
+
+def price_for(model):
+    f = fam_name(model)
+    return PRICE[f] if f else None
 
 def parse_ts(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
@@ -197,6 +208,35 @@ def cost_over(records, start_utc, end_utc, keep=None):
             tot += rec_cost(r)
     return tot
 
+def comp_over(records, start_utc, end_utc):
+    """Per-model-family token composition over a window:
+    {family: [fresh_input, cache_read, cache_creation, output]}."""
+    comp = {}
+    for r in records:
+        if start_utc <= r["ts"] < end_utc:
+            fam = fam_name(r["model"])
+            if fam is None:
+                continue
+            c = comp.setdefault(fam, [0, 0, 0, 0])
+            c[0] += r["fresh_input"]; c[1] += r["cache_read"]
+            c[2] += r["cache_creation"]; c[3] += r["output"]
+    return comp
+
+def comp_cost(comp, keep=None):
+    """Cost-equivalent $ of a stored composition under the CURRENT weights —
+    calibration pairs are derived from composition at fit time, so retuning
+    CR/CW/prices re-fits every historical point with no log access needed."""
+    tot = 0.0
+    for fam, c in (comp or {}).items():
+        if keep is not None and fam not in keep:
+            continue
+        pin, pout = PRICE[fam]
+        tot += pin * (c[0] + CR * c[1] + CW * c[2]) + pout * c[3]
+    return tot * 1e-6
+
+FABLE_ONLY = {"fable"}          # hypothesis A model set
+PREMIUM = {"fable", "opus"}     # hypothesis B model set
+
 
 # ---- the ONE config file -----------------------------------------------------
 def load_config():
@@ -271,11 +311,13 @@ def parse_usage_blocks(text):
 
 
 def _parse_reset(raw, tzname, ref):
-    """'Jul 4, 11:59pm' (+ optional IANA tz) -> the true boundary instant, UTC.
-    /usage displays the last usable minute (X:59) of a reset that sits on the
-    hour, so the boundary = displayed time +1min, floored to the hour (also a
-    no-op for an exact on-the-hour display). No year is printed: pick the
-    candidate nearest the capture time (Dec/Jan safe)."""
+    """'Jul 4, 11:59pm' / 'Jul 7, 7:09pm' (+ optional IANA tz) -> the true
+    boundary instant, UTC. /usage displays the last usable MINUTE of the
+    window ('11:59pm' -> midnight, '7:09pm' -> 7:10 — session blocks anchor to
+    the first request's minute, not the hour), except an exact :00 display,
+    which IS the boundary ('12am', '5pm'). So: minute != 0 -> +1min; :00 stays.
+    No year is printed: pick the candidate nearest the capture time (Dec/Jan
+    safe)."""
     if not raw:
         return None
     try:
@@ -305,7 +347,8 @@ def _parse_reset(raw, tzname, ref):
         d = ref_l.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if d <= ref_l:
             d += timedelta(days=1)
-    d = (d + timedelta(minutes=1)).replace(minute=0, second=0, microsecond=0)
+    if d.minute:                         # last-usable-minute display -> boundary
+        d += timedelta(minutes=1)
     return d.astimezone(UTC)
 
 
@@ -332,11 +375,13 @@ def save_points(d):
 
 
 def derive_point(block, T, records):
-    """Turn one parsed /usage block captured at T into a calibration point:
-    (cost-in-window, real %) pairs per bucket, plus the reset anchors it pins.
-    Pairs are frozen at ingest so later transcript cleanup can't corrode the
-    fit; a pair is only taken when T verifiably lies inside its window."""
-    pt = {"captured": T.isoformat(), "hash": block["hash"], "pairs": {}}
+    """Turn one parsed /usage block captured at T into a calibration point
+    (schema v2): the raw token COMPOSITION of each window plus its real %, and
+    the reset anchors the block pins. Composition is frozen at ingest so later
+    transcript cleanup can't corrode it, but dollars are derived from it at fit
+    time — so a weight/price retune re-fits all history without the logs.
+    A window is only taken when T verifiably lies inside it."""
+    pt = {"captured": T.isoformat(), "hash": block["hash"]}
     s = block.get("session")
     if s and s.get("reset_raw"):
         end = _parse_reset(s["reset_raw"], s.get("tz"), T)
@@ -344,7 +389,7 @@ def derive_point(block, T, records):
             pt["session_anchor"] = end.isoformat()
             start = end - timedelta(hours=SESSION_HOURS)
             if start <= T <= end:
-                pt["pairs"]["session"] = [cost_over(records, start, T), s["pct"]]
+                pt["session"] = {"comp": comp_over(records, start, T), "pct": s["pct"]}
     wk, prem = block.get("week_all"), block.get("premium")
     wsrc = wk or prem or {}
     if wsrc.get("reset_raw"):
@@ -361,13 +406,12 @@ def derive_point(block, T, records):
                                       time(wl.hour, wl.minute),
                                       tzinfo=tz).astimezone(UTC)
             if wstart <= T <= wend:
+                w = {"comp": comp_over(records, wstart, T)}
                 if wk:
-                    pt["pairs"]["week_all"] = [cost_over(records, wstart, T), wk["pct"]]
+                    w["all_pct"] = wk["pct"]
                 if prem:
-                    pt["pairs"]["week_fable_A"] = [
-                        cost_over(records, wstart, T, keep=is_fable_strict), prem["pct"]]
-                    pt["pairs"]["week_fable_B"] = [
-                        cost_over(records, wstart, T, keep=is_premium), prem["pct"]]
+                    w["fable_pct"] = prem["pct"]
+                pt["week"] = w
     return pt
 
 
@@ -412,13 +456,30 @@ def fit_through_origin(pairs):
 
 
 def fits_from(store, plan):
-    """Per-bucket fit from stored points; a bucket with no points yet falls back
-    to the plan-tier default scale (always provisional)."""
+    """Per-bucket fit from stored points — (cost, %) pairs are derived from each
+    point's stored composition under the CURRENT weights. The premium bucket is
+    derived under both hypotheses (A: fable-only, B: opus-class) from the same
+    week composition. A bucket with no points yet falls back to the plan-tier
+    default scale (always provisional)."""
     pairs = {k: [] for k in BASE_A}
     for p in store["points"]:
-        for k, pr in (p.get("pairs") or {}).items():
-            if k in pairs and pr and pr[0] > 0:
-                pairs[k].append(tuple(pr))
+        s = p.get("session")
+        if s and s.get("comp") is not None:
+            x = comp_cost(s["comp"])
+            if x > 0:
+                pairs["session"].append((x, s["pct"]))
+        w = p.get("week")
+        if w and w.get("comp") is not None:
+            xw = comp_cost(w["comp"])
+            if w.get("all_pct") is not None and xw > 0:
+                pairs["week_all"].append((xw, w["all_pct"]))
+            if w.get("fable_pct") is not None:
+                xa = comp_cost(w["comp"], keep=FABLE_ONLY)
+                xb = comp_cost(w["comp"], keep=PREMIUM)
+                if xa > 0:
+                    pairs["week_fable_A"].append((xa, w["fable_pct"]))
+                if xb > 0:
+                    pairs["week_fable_B"].append((xb, w["fable_pct"]))
     mult = TIER_MULT.get(plan, 1.0)
     return {k: (fit_through_origin(v) if v else
                 {"a": BASE_A[k] * mult, "sigma": None, "floor": 0.0, "n": 0})
@@ -459,8 +520,10 @@ def session_window(now_utc, records, anchor=None):
     is True whenever the window is under-corroborated (walk fallback, re-anchored,
     or the block's first local request lands well past its start).
 
-    All rolling is UTC-absolute (DST-free); local tz is touched only to floor a
-    re-anchored resume to the hour. Returns (None, None, True) when idle."""
+    All rolling is UTC-absolute (DST-free); a re-anchored resume is floored to
+    its MINUTE — blocks anchor to the first request's minute, not the hour
+    (observed: a 2:09pm off-device start displaying 'resets 7:09pm').
+    Returns (None, None, True) when idle."""
     H = timedelta(hours=SESSION_HOURS)
 
     if anchor is not None:
@@ -482,7 +545,7 @@ def session_window(now_utc, records, anchor=None):
                 if gs == e:                       # resume in the next grid slot
                     s, e = e, e + H               #   -> continuous, stay on grid
                 else:                             # idle skipped >=1 slot -> re-anchor
-                    spt = ts.astimezone(local_tz()).replace(minute=0, second=0, microsecond=0)
+                    spt = ts.astimezone(local_tz()).replace(second=0, microsecond=0)
                     s = spt.astimezone(UTC); e = s + H
                     on_grid = False
         if e is None:                             # no local requests in this chain
@@ -496,7 +559,7 @@ def session_window(now_utc, records, anchor=None):
         s = e = None                              # ultimate fallback: local gap-walk
         for ts in msgs:
             if e is None or ts >= e:
-                spt = ts.astimezone(local_tz()).replace(minute=0, second=0, microsecond=0)
+                spt = ts.astimezone(local_tz()).replace(second=0, microsecond=0)
                 s = spt.astimezone(UTC); e = s + H
         if e is None or now_utc >= e:
             return None, None, True               # no active session (idle)
@@ -510,7 +573,8 @@ def session_window(now_utc, records, anchor=None):
 # ---- live gauge computation (consumed by the widget) ------------------------
 def _fmt_hour(dt):
     l = dt.astimezone(local_tz()); h = l.hour % 12 or 12
-    return f"{h}{'am' if l.hour < 12 else 'pm'}"
+    m = f":{l.minute:02d}" if l.minute else ""      # mid-hour resets are real
+    return f"{h}{m}{'am' if l.hour < 12 else 'pm'}"
 
 def _fmt_week(dt):
     l = dt.astimezone(local_tz()); h = l.hour % 12 or 12
