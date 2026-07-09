@@ -52,7 +52,11 @@ SESSION_LATE_SOFT_MINUTES = 75
 # last touched before this can't contribute and are skipped unopened.
 LOOKBACK_DAYS = 8
 
-FABLE_HYP = "A"   # A = Fable-5 only ; B = Opus-class. Flip once pastes decide.
+# Through-origin fits regress over the freshest N points per bucket, so the
+# scale can track a provider limits change (promo rollover, tier migration)
+# instead of blending regimes forever. Older points stay stored (schema v2
+# re-derives history on any retune) — only the regression's diet is bounded.
+FIT_WINDOW = 12
 
 # Zero-paste fallback scales (% per cost-equivalent $) so the widget shows a
 # sane provisional number straight after download. Derived from one calibrated
@@ -245,7 +249,14 @@ def find_logs_dir(override=None):
 def load_records(logs_dir, since=None):
     """One deduped record per billable request: dict(ts, model, is_sub, tokens...).
     `since` skips files not touched since then (a file's records can't be newer
-    than its mtime, so this is loss-free for windowed math)."""
+    than its mtime, so this is loss-free for windowed math).
+
+    A streaming response is written to the transcript as PROGRESSIVE snapshots —
+    several lines share one requestId, input/cache identical, output growing
+    (measured 2026-07-09: 36% of requestIds; keep-first loses 42% of output
+    tokens, ~18% of cost-equivalent). Keep the FINAL snapshot's usage (max
+    output) with the first snapshot's timestamp, which is the request's start
+    and what session blocks anchor to."""
     seen = {}
     unknown_models = {}
     files = []
@@ -263,7 +274,9 @@ def load_records(logs_dir, since=None):
             continue
         with fh:
             for line in fh:
-                line = line.strip()
+                if '"usage"' not in line:     # billable lines always carry the key;
+                    continue                  # skipping the rest avoids json.loads
+                line = line.strip()           # on megabyte tool-result lines
                 if not line:
                     continue
                 try:
@@ -279,18 +292,16 @@ def load_records(logs_dir, since=None):
                 if model == "<synthetic>":
                     continue
                 key = d.get("requestId") or m.get("id")
-                if not key or key in seen:
+                if not key:
                     continue
                 ts = d.get("timestamp")
                 if not ts:
                     continue
-                if price_for(model) is None:
-                    unknown_models[model] = unknown_models.get(model, 0) + 1
                 u = m["usage"]
                 fresh = u.get("input_tokens", 0) or 0
                 cread = u.get("cache_read_input_tokens", 0) or 0
                 cwrite = u.get("cache_creation_input_tokens", 0) or 0
-                seen[key] = dict(
+                rec = dict(
                     ts=parse_ts(ts), model=model, is_sub=bool(d.get("isSidechain")),
                     sid=d.get("sessionId"), agent=d.get("attributionAgent"),
                     ctx=fresh + cread + cwrite,
@@ -299,6 +310,14 @@ def load_records(logs_dir, since=None):
                     cache_read=cread,
                     cache_creation=cwrite,
                 )
+                old = seen.get(key)
+                if old is None:
+                    if price_for(model) is None:
+                        unknown_models[model] = unknown_models.get(model, 0) + 1
+                    seen[key] = rec
+                elif rec["output"] > old["output"]:
+                    rec["ts"] = old["ts"]     # keep the request's START time
+                    seen[key] = rec
     return list(seen.values()), files, unknown_models
 
 def rec_cost(r):
@@ -323,13 +342,6 @@ def rec_credit_cost(r):
     pin, pout = p
     eff_in = r["fresh_input"] + acr * r["cache_read"] + acw * r["cache_creation"]
     return (pin * eff_in + pout * r["output"]) * 1e-6
-
-def is_fable_strict(model):   # hypothesis A: literally Fable 5
-    return "fable" in (model or "").lower() or "mythos" in (model or "").lower()
-
-def is_premium(model):        # hypothesis B: Opus-class premium (opus + fable)
-    ml = (model or "").lower()
-    return "fable" in ml or "mythos" in ml or "opus" in ml
 
 def cost_over(records, start_utc, end_utc, keep=None):
     tot = 0.0
@@ -386,6 +398,8 @@ def insights(records, now):
         tot = sum(rec_cost(r) for r in rs) or 1.0
         sess = {}
         for r in rs:
+            if r["sid"] is None:              # no sessionId -> can't attribute;
+                continue                      # never collapse into one phantom
             s = sess.setdefault(r["sid"], [r["ts"], r["ts"]])
             if r["ts"] < s[0]: s[0] = r["ts"]
             if r["ts"] > s[1]: s[1] = r["ts"]
@@ -407,7 +421,6 @@ def insights(records, now):
 
 FABLE_ONLY = {"fable"}          # hypothesis A model set
 PREMIUM = {"fable", "opus"}     # hypothesis B model set
-OPUS_ONLY = {"opus"}
 INPLAN_NO_FABLE = set(PRICE) - {"fable"}   # the weekly bucket once Fable exits it
 
 
@@ -428,7 +441,8 @@ def load_config():
     except OSError:
         text, mtime = "", datetime.now(UTC)
     cfg = {"logs_path": "", "plan": "max20x", "credits_cap": "",
-           "credits_from": "", "credits_reset_day": "1", "text": text, "mtime": mtime}
+           "credits_from": "", "credits_reset_day": "1", "text": text, "mtime": mtime,
+           "warnings": []}
     for line in text.splitlines():
         if line.lstrip().startswith("#"):
             continue
@@ -439,15 +453,23 @@ def load_config():
     cfg["plan"] = (cfg["plan"] or "max20x").lower().replace(" ", "")
     if cfg["plan"] not in TIER_MULT:
         cfg["plan"] = "max20x"
+    # A malformed credits setting must never fail SILENTLY into the opposite of
+    # what the user configured ($0 forever) — surface it in the footer caveat.
+    raw_cap = str(cfg["credits_cap"]).strip()
     try:
-        cap = float(str(cfg["credits_cap"]).replace("$", "").replace(",", "").strip())
+        cap = float(raw_cap.replace("$", "").replace(",", ""))
         cfg["credits_cap"] = cap if cap > 0 else None
     except (ValueError, TypeError):
         cfg["credits_cap"] = None
+        if raw_cap:
+            cfg["warnings"].append(f"credits_cap '{raw_cap}' isn't a number — ignored")
+    raw_from = str(cfg["credits_from"]).strip()
     try:
-        cfg["credits_from"] = date.fromisoformat(str(cfg["credits_from"]).strip())
+        cfg["credits_from"] = date.fromisoformat(raw_from)
     except (ValueError, TypeError):
         cfg["credits_from"] = None
+        if raw_from:
+            cfg["warnings"].append(f"credits_from '{raw_from}' isn't YYYY-MM-DD — ignored")
     try:
         cfg["credits_reset_day"] = max(1, min(28, int(str(cfg["credits_reset_day"]).strip())))
     except (ValueError, TypeError):
@@ -551,6 +573,14 @@ def load_points():
     d.setdefault("version", 1)
     d.setdefault("seen_hashes", [])
     d.setdefault("points", [])
+    # Stores written before the snapshot-dedup fix froze day comps that
+    # under-count output; the ledger refills itself from still-present logs on
+    # the next refresh, so just drop it. (Calibration points are kept — a
+    # consistent old-scale point is still a valid pair, and FIT_WINDOW retires
+    # them naturally as new pastes arrive.)
+    if d.get("dedup") != "max":
+        d.pop("day_comps", None)
+        d["dedup"] = "max"
     return d
 
 def save_points(d):
@@ -668,8 +698,6 @@ def ingest_pastes(cfg, records, store):
         store["session_anchor"] = ptn["session_anchor"]
     if ptn.get("week_anchor"):
         store["week_anchor"] = ptn["week_anchor"]
-    if (ptn.get("week") or {}).get("label"):
-        store["premium_label"] = ptn["week"]["label"]   # gauge 3 follows /usage
     save_points(store)
     return quarantined
 
@@ -713,7 +741,7 @@ def fits_from(store, plan):
                 if xb > 0:
                     pairs["week_fable_B"].append((xb, w["fable_pct"]))
     mult = TIER_MULT.get(plan, 1.0)
-    return {k: (fit_through_origin(v) if v else
+    return {k: (fit_through_origin(v[-FIT_WINDOW:]) if v else
                 {"a": BASE_A[k] * mult, "sigma": None, "floor": 0.0, "n": 0})
             for k, v in pairs.items()}
 
@@ -882,8 +910,14 @@ def session_window(now_utc, records, anchor=None):
                 s = grid_start(ts); e = s + H
             elif ts >= e:                         # previous block expired at e
                 gs = grid_start(ts)
-                if gs == e:                       # resume in the next grid slot
-                    s, e = e, e + H               #   -> continuous, stay on grid
+                if gs == e:                       # resume in the very next grid slot:
+                    s, e = e, e + H               # BET the grid persisted (an unseen
+                    # off-device request near the boundary kept the chain — observed
+                    # on this grid's own anchor). If nothing ran anywhere, the true
+                    # block starts at the resume instead, so the shown reset can be
+                    # early by up to the resume lag; the >75min lag guard below
+                    # softens the worst of it, and cost math is unaffected (the gap
+                    # holds no records either way).
                 else:                             # idle skipped >=1 slot -> re-anchor
                     spt = ts.astimezone(local_tz()).replace(second=0, microsecond=0)
                     s = spt.astimezone(UTC); e = s + H
@@ -980,8 +1014,9 @@ def compute_gauges(now=None, records=None):
         dmiss += timedelta(days=1)
     if dmiss < today_l:
         since = min(since, datetime.combine(dmiss, time(0, 0), tzinfo=tzl).astimezone(UTC))
+    unknown = {}
     if records is None:
-        records, _, _ = load_records(logs, since)
+        records, _, unknown = load_records(logs, since)
     quarantined = ingest_pastes(cfg, records, store)
     if update_day_ledger(store, records, led_from, now):
         save_points(store)
@@ -1005,15 +1040,24 @@ def compute_gauges(now=None, records=None):
     cost_opus = cost_over(records, w_st, now, keep=lambda m: fam_name(m) == "opus")
     sp, _, spv = _predict(cost_sess, fits["session"])
     ap, _, apv = _predict(cost_all, fits["week_all"])
-    op, _, opv = _predict(cost_opus, fits["week_all"])   # reuse calibrated fit
+    # Reuse the calibrated week_all SCALE but not its floor: the floor is the
+    # fit's unseen ALL-models baseline, and adding it to an Opus-only cost
+    # would overstate Opus — the one way this gauge could breach floor
+    # semantics. Zeroing it under-claims instead, consistent with the ethic.
+    op, _, opv = _predict(cost_opus, {**fits["week_all"], "floor": 0.0})
     sp, ap, op = round(sp), round(ap), round(op)
+    if s_st is None:
+        sp = 0          # idle: no active window — showing the fit's floor as a
+                        # "current session %" would be a % of nothing
     # ghost arc = burn-rate projection to the window's reset (None if too early)
     s_proj = _project(sp, s_st, s_end, now)
     w_proj = _project(ap, w_st, w_end, now)
     o_proj = _project(op, w_st, w_end, now)
 
     def _danger(pt, proj):
-        return bool((proj is not None and proj >= 90) or pt > 100)
+        # >= not >: _predict clamps to 100, so a pegged gauge must read as red
+        # on its own — the projection returns None once proj <= point.
+        return bool((proj is not None and proj >= 90) or pt >= 100)
 
     week_reset = _fmt_week(w_end) if w_end else "unknown"
 
@@ -1074,6 +1118,11 @@ def compute_gauges(now=None, records=None):
     if quarantined:
         caveat += (f" Skipped the paste's {'/'.join(quarantined)} reading(s) — "
                    "they contradict local logs (provider likely reset its counters).")
+    if unknown:
+        caveat += (" Unknown model(s) priced $0: "
+                   + ", ".join(sorted(unknown)) + " — update pricing.json.")
+    for w in cfg["warnings"]:
+        caveat += f" Config: {w}."
     return {
         "gauges": [
             {"key": "session", "label": "Session", "sub": "5-hour window",
