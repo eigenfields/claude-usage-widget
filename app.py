@@ -9,6 +9,7 @@ Launch silently with run.vbs, or:  pyw app.py
 """
 import ctypes
 import json
+import os
 import sys
 import threading
 import time
@@ -35,6 +36,14 @@ EXPANDED = (660, 560)   # generous initial height; JS fit_height trims to the ca
 COLLAPSED = (400, 62)
 
 
+# pywebview runs every JS-API call on its own thread, and refreshes arrive from
+# three triggers (config watcher, heartbeat, button) that can overlap — exactly
+# when a paste just landed. compute_gauges() is a read-modify-write of
+# points.json, so serialize it; the state file gets its own lock.
+_REFRESH_LOCK = threading.Lock()
+_STATE_LOCK = threading.Lock()
+
+
 def read_state():
     try:
         return json.loads(STATE.read_text(encoding="utf-8"))
@@ -43,35 +52,54 @@ def read_state():
 
 
 def write_state(d):
+    tmp = STATE.with_suffix(".tmp")
     try:
-        STATE.write_text(json.dumps(d), encoding="utf-8")
+        tmp.write_text(json.dumps(d), encoding="utf-8")
+        os.replace(tmp, STATE)                          # atomic — no torn state
     except Exception:
         pass
 
 
+def _saved_height():
+    h = read_state().get("h")
+    return int(h) if isinstance(h, (int, float)) and 120 <= h <= 1000 else EXPANDED[1]
+
+
 class Api:
     def refresh(self):
-        try:
-            return engine.compute_gauges()
-        except Exception as e:
-            return {"error": f"{type(e).__name__}: {e}"}
+        with _REFRESH_LOCK:
+            try:
+                return engine.compute_gauges()
+            except Exception as e:
+                return {"error": f"{type(e).__name__}: {e}"}
 
     def get_state(self):
         return {"collapsed": bool(read_state().get("collapsed", False))}
 
     def set_collapsed(self, collapsed):
         collapsed = bool(collapsed)
-        write_state({"collapsed": collapsed})
+        with _STATE_LOCK:
+            st = read_state()
+            st["collapsed"] = collapsed
+            write_state(st)
         try:
-            webview.windows[0].resize(*(COLLAPSED if collapsed else EXPANDED))
+            # expand straight to the last fitted height — no 560px flash
+            webview.windows[0].resize(*(COLLAPSED if collapsed
+                                        else (EXPANDED[0], _saved_height())))
         except Exception:
             pass
         return {"collapsed": collapsed}
 
     def fit_height(self, h):
-        """Size the (expanded) window to the card's measured content height."""
+        """Size the (expanded) window to the card's measured content height,
+        remembering it so the next expand/launch skips the settle flash."""
         try:
             h = max(120, min(int(h), 1000))
+            with _STATE_LOCK:
+                st = read_state()
+                if st.get("h") != h:
+                    st["h"] = h
+                    write_state(st)
             webview.windows[0].resize(EXPANDED[0], h)
         except Exception:
             pass
@@ -87,11 +115,20 @@ def set_window_icon(window):
     try:
         if not ICON.exists():
             return
-        hwnd = window.native.Handle.ToInt32()
+        # ToInt64, and real ctypes signatures: handles are pointer-sized — the
+        # c_int defaults truncate HWND/HICON above 2^31 (legal on 64-bit).
+        hwnd = int(window.native.Handle.ToInt64())
+        u = ctypes.windll.user32
+        u.LoadImageW.restype = wintypes.HANDLE
+        u.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, ctypes.c_uint,
+                                 ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        u.SendMessageW.restype = ctypes.c_ssize_t                  # LRESULT
+        u.SendMessageW.argtypes = [wintypes.HWND, ctypes.c_uint,
+                                   wintypes.WPARAM, wintypes.LPARAM]
         for flag, cx in ((0, 16), (1, 32)):            # ICON_SMALL / ICON_BIG
-            hicon = ctypes.windll.user32.LoadImageW(
+            hicon = u.LoadImageW(
                 None, str(ICON), 1, cx, cx, 0x00000010)  # IMAGE_ICON, LR_LOADFROMFILE
-            ctypes.windll.user32.SendMessageW(hwnd, 0x0080, flag, hicon)
+            u.SendMessageW(hwnd, 0x0080, flag, hicon)
     except Exception:
         pass
 
@@ -99,7 +136,7 @@ def set_window_icon(window):
 def start_hotkey(window):
     """Global Ctrl+Alt+U toggles HUD visibility (recall without the taskbar)."""
     try:
-        hwnd = window.native.Handle.ToInt32()
+        hwnd = int(window.native.Handle.ToInt64())
     except Exception:
         return
 
@@ -164,7 +201,7 @@ def main():
     except Exception:
         pass
     collapsed = bool(read_state().get("collapsed", False))
-    w, h = COLLAPSED if collapsed else EXPANDED
+    w, h = COLLAPSED if collapsed else (EXPANDED[0], _saved_height())
     win = webview.create_window(
         "Claude Code Usage",
         url=HTML.as_uri() + ("?c=1" if collapsed else ""),
@@ -175,7 +212,9 @@ def main():
         background_color=BG,
     )
     win.events.loaded += lambda: on_loaded(win)
-    webview.start(gui="edgechromium")
+    # The widget is Windows-first (WebView2, Win32 icon/hotkey); elsewhere let
+    # pywebview pick its native backend — the ctypes calls already no-op safely.
+    webview.start(gui="edgechromium" if sys.platform == "win32" else None)
 
 
 if __name__ == "__main__":
