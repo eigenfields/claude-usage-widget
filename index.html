@@ -40,8 +40,8 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
 
   /* fixed height + centered content => header height never depends on font/SVG
      settle timing, and the mascot/wordmark sit centered with room above the rule */
-  header{ cursor:grab; height:54px; flex:none; display:flex; align-items:center; gap:11px;
-    border-bottom:1px solid var(--track); }
+  header{ cursor:grab; height:54px; flex:none; display:flex; align-items:flex-start; gap:11px;
+    padding-top:4px; border-bottom:1px solid var(--track); }
   header:active{ cursor:grabbing; }
   .mascot{ display:flex; }
   .mascot svg{ height:32px; width:32px; display:block; }
@@ -72,22 +72,22 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
   .m2{ font-size:13px; color:var(--muted); margin-top:2px; }
 
   .legend{ flex:none; display:flex; justify-content:center; gap:20px; padding:6px 0 3px; margin-top:14px; }
-  .legend span{ display:flex; align-items:center; gap:7px; font-size:11px; color:var(--sub); }
-  .sw{ width:15px; height:5px; border-radius:3px; background:var(--hot); }
+  .legend span{ display:flex; align-items:center; gap:7px; font-size:12.5px; color:var(--sub); }
+  .sw{ width:17px; height:6px; border-radius:3px; background:var(--hot); }
   .sw.proj{ opacity:.30; }
 
   /* local behavior insights: two compact columns of labeled mini-bars */
   .insights{ flex:none; margin-top:15px; border-top:1px solid var(--edge); padding-top:12px;
     display:flex; gap:28px; }
-  .icol{ flex:1; min-width:0; }
-  .ihead{ font-size:12px; color:var(--sub); margin-bottom:4px; letter-spacing:.2px; }
+  .icol{ flex:1; min-width:0; background:#212120; padding:10px 12px; border-radius:8px; }
+  .ihead{ font-size:13px; color:var(--sub); margin-bottom:4px; letter-spacing:.2px; }
   .irow{ display:flex; align-items:center; gap:8px; margin-top:6px; }
-  .ilbl{ font-size:11px; color:var(--muted); width:82px; flex:none; }
-  .itrack{ flex:1; height:4px; border-radius:2px; background:var(--track); overflow:hidden; }
-  .ifill{ height:100%; border-radius:2px; background:var(--soft); }
-  .ival{ font-size:11px; color:var(--sub); width:32px; text-align:right; flex:none;
+  .ilbl{ font-size:12.5px; color:var(--ink); width:96px; flex:none; }  /* 96: mono at 12.5px */
+  .itrack{ flex:1; height:7px; border-radius:3px; background:var(--track); overflow:hidden; }
+  .ifill{ height:100%; border-radius:3px; background:var(--hot); }     /* Book Cloth = live */
+  .ival{ font-size:12.5px; color:var(--sub); width:32px; text-align:right; flex:none;
     font-variant-numeric:tabular-nums lining-nums; }
-  .iagents{ margin-top:8px; font-size:11px; color:var(--muted); white-space:nowrap;
+  .iagents{ margin-top:8px; font-size:12.5px; color:var(--sub); white-space:nowrap;
     overflow:hidden; text-overflow:ellipsis; }
 
   footer{ flex:none; margin-top:16px; border-top:1px solid var(--edge); padding-top:11px; }
