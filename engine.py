@@ -113,9 +113,105 @@ def fam_name(model):
     if "haiku" in ml:  return "haiku"
     return None
 
+
+# ---- version-aware price resolution (DOLLARS side only) ------------------------
+# pricing.json drives the credits estimator: versioned rates (Opus 4.1 at 15/75,
+# not the family's 5/25) and dated periods (Sonnet 5 intro pricing). The
+# subscription %-fit NEVER uses this — it keeps the standing family ruler so
+# calibration history stays comparable. Missing/broken pricing.json degrades to
+# the hardcoded PRICE table: never crash, never network.
+PRICING_PATH = HERE / "pricing.json"
+_PCACHE = {"mtime": None, "data": None, "keys": (), "standing": None}
+
+def _pick_period(entries, when):
+    """From [{until?, input, output}, ...] pick the rate for `when` (a date);
+    when=None means the open/standing rate."""
+    openr, dated = None, []
+    for e in entries or []:
+        if "until" in e:
+            dated.append(e)
+        else:
+            openr = e
+    if when is not None:
+        for e in sorted(dated, key=lambda x: x["until"]):
+            if when <= date.fromisoformat(e["until"]):
+                return (float(e["input"]), float(e["output"]))
+    if openr is not None:
+        return (float(openr["input"]), float(openr["output"]))
+    if dated:
+        e = dated[-1]
+        return (float(e["input"]), float(e["output"]))
+    return None
+
+def _pricing():
+    """pricing.json, mtime-cached so edits (or a merged refresh PR) apply on the
+    next refresh without a restart. Returns None on missing/malformed."""
+    try:
+        mt = PRICING_PATH.stat().st_mtime
+    except OSError:
+        _PCACHE.update(mtime=None, data=None, keys=(), standing=None)
+        return None
+    if _PCACHE["mtime"] != mt:
+        try:
+            d = json.loads(PRICING_PATH.read_text(encoding="utf-8"))
+            keys = []
+            for k, v in d.get("models", {}).items():
+                toks = tuple(t for t in re.split(r"[^a-z0-9]+", k.lower()) if t)
+                keys.append((toks, v if isinstance(v, list) else [v]))
+            keys.sort(key=lambda kv: -len(kv[0]))       # most specific first
+            standing = {}
+            for fam, anchor in d.get("family_fallback", {}).items():
+                v = d.get("models", {}).get(anchor)
+                r = _pick_period(v if isinstance(v, list) else [v] if v else [], None)
+                if r:
+                    standing[fam] = r
+            _PCACHE.update(mtime=mt, data=d, keys=tuple(keys), standing=standing)
+        except Exception:
+            _PCACHE.update(mtime=mt, data=None, keys=(), standing=None)
+    return _PCACHE["data"]
+
+def _standing():
+    """Family -> (in, out) at the OPEN (standing) rate — the subscription ruler."""
+    _pricing()
+    return _PCACHE["standing"] or PRICE
+
+def _api_weights():
+    d = _pricing()
+    cm = (d or {}).get("cache_multipliers") or {}
+    try:
+        return float(cm.get("read", API_CR)), float(cm.get("write", API_CW))
+    except (TypeError, ValueError):
+        return API_CR, API_CW
+
+def resolve_rate(raw_model, when_date):
+    """($/MTok in, out) for a specific model VERSION on a given date. Most-
+    specific pricing.json key wins (opus-4-1 before any generic opus), matched
+    as a contiguous token run inside the raw id; dated periods honored. No
+    version match -> the family's fallback anchor at that date; unknown family
+    or no pricing.json -> hardcoded standing table (None if family unknown)."""
+    fam = fam_name(raw_model)
+    d = _pricing()
+    if d is None:
+        return PRICE.get(fam) if fam else None
+    toks = [t for t in re.split(r"[^a-z0-9]+", (raw_model or "").lower()) if t]
+    for ktoks, entries in _PCACHE["keys"]:
+        n = len(ktoks)
+        if n and any(tuple(toks[i:i + n]) == ktoks for i in range(len(toks) - n + 1)):
+            r = _pick_period(entries, when_date)
+            if r:
+                return r
+    fb = d.get("family_fallback", {}).get(fam)
+    if fb:
+        v = d.get("models", {}).get(fb)
+        r = _pick_period(v if isinstance(v, list) else [v] if v else [], when_date)
+        if r:
+            return r
+    return PRICE.get(fam) if fam else None
+
+
 def price_for(model):
     f = fam_name(model)
-    return PRICE[f] if f else None
+    return _standing().get(f) if f else None
 
 def parse_ts(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
@@ -206,11 +302,26 @@ def load_records(logs_dir, since=None):
     return list(seen.values()), files, unknown_models
 
 def rec_cost(r):
+    """Subscription-side record cost: standing family rates + limiter cache
+    weights. This is the %-fit ruler — deliberately NOT version/date-aware, so
+    calibration pairs stay comparable across pricing changes."""
     p = price_for(r["model"])
     if p is None:
         return 0.0
     pin, pout = p
     eff_in = r["fresh_input"] + CR * r["cache_read"] + CW * r["cache_creation"]
+    return (pin * eff_in + pout * r["output"]) * 1e-6
+
+def rec_credit_cost(r):
+    """Credits-side record cost: what usage credits would BILL this request —
+    the model VERSION's list rate on that request's date (Opus 4.1 at 15/75,
+    Sonnet 5 intro pricing before Sep 1) with API cache weights."""
+    p = resolve_rate(r["model"], r["ts"].date())
+    if p is None:
+        return 0.0
+    acr, acw = _api_weights()
+    pin, pout = p
+    eff_in = r["fresh_input"] + acr * r["cache_read"] + acw * r["cache_creation"]
     return (pin * eff_in + pout * r["output"]) * 1e-6
 
 def is_fable_strict(model):   # hypothesis A: literally Fable 5
@@ -241,19 +352,25 @@ def comp_over(records, start_utc, end_utc):
             c[2] += r["cache_creation"]; c[3] += r["output"]
     return comp
 
-def comp_cost(comp, keep=None, cr=None, cw=None):
+def comp_cost(comp, keep=None, cr=None, cw=None, when=None):
     """Cost-equivalent $ of a stored composition — under the subscription
-    limiter weights by default (calibration pairs derive from composition at
-    fit time, so retuning CR/CW/prices re-fits all history without logs), or
-    under explicit weights (cr=API_CR, cw=API_CW prices a composition at what
-    usage credits would actually bill)."""
+    limiter weights and standing family rates by default (calibration pairs
+    derive from composition at fit time, so retuning CR/CW/prices re-fits all
+    history without logs). Credits paths pass cr/cw=API weights and `when` (a
+    date) to price each family at its fallback anchor's DATED rate. Comps are
+    family-keyed, so version identity is already lost here — ledger/historical
+    credit dollars stay family-approximate by design (rec_credit_cost carries
+    full version accuracy for the live portion)."""
     cr = CR if cr is None else cr
     cw = CW if cw is None else cw
     tot = 0.0
     for fam, c in (comp or {}).items():
         if keep is not None and fam not in keep:
             continue
-        pin, pout = PRICE[fam]
+        rate = _standing().get(fam) if when is None else resolve_rate(fam, when)
+        if rate is None:
+            continue
+        pin, pout = rate
         tot += pin * (c[0] + cr * c[1] + cw * c[2]) + pout * c[3]
     return tot * 1e-6
 
@@ -695,11 +812,12 @@ def _overage_credits(store, fits, wanchor, cp_start, now, today_comp, tzl, fable
                 seg_end = min(de, we)
                 f = (seg_end - mid).total_seconds() / (de - ds).total_seconds()
                 fams = None if d < fable_from else INPLAN_NO_FABLE
-                sub = comp_cost(comp, keep=fams) * f
+                sub = comp_cost(comp, keep=fams) * f   # boundary walks in SUBSCRIPTION $
                 if sub > 0 and cum + sub > budget and mid >= cp_start:
                     of = min(1.0, (cum + sub - budget) / sub)
+                    acr, acw = _api_weights()
                     for fam in (comp if fams is None else fams & set(comp)):
-                        usd = comp_cost({fam: comp[fam]}, cr=API_CR, cw=API_CW) * f * of
+                        usd = comp_cost({fam: comp[fam]}, cr=acr, cw=acw, when=d) * f * of
                         if usd > 0:
                             over[fam] = over.get(fam, 0.0) + usd
                 cum += sub
@@ -909,16 +1027,19 @@ def compute_gauges(now=None, records=None):
     today_comp = comp_over(records, today_start, now)
     fable_usd = 0.0
     if cfg["credits_from"]:
+        acr, acw = _api_weights()
         f_start = max(cp_start, datetime.combine(cfg["credits_from"], time(0, 0),
                                                  tzinfo=tzl).astimezone(UTC))
         dd = f_start.astimezone(tzl).date()
         while dd < today_l:
             c = store.get("day_comps", {}).get(dd.isoformat())
-            if c:
-                fable_usd += comp_cost(c, keep=FABLE_ONLY, cr=API_CR, cw=API_CW)
+            if c:  # family-approximate at the day's dated rate (comps drop version)
+                fable_usd += comp_cost(c, keep=FABLE_ONLY, cr=acr, cw=acw, when=dd)
             dd += timedelta(days=1)
         if f_start <= today_start:
-            fable_usd += comp_cost(today_comp, keep=FABLE_ONLY, cr=API_CR, cw=API_CW)
+            # live portion is per-record -> FULL version+date accuracy
+            fable_usd += sum(rec_credit_cost(r) for r in records
+                             if r["ts"] >= today_start and fam_name(r["model"]) == "fable")
     # (b) usage past the weekly budget while in-plan (est., under-claims)
     over = _overage_credits(store, fits, store.get("week_anchor"), cp_start, now,
                             today_comp, tzl, cfg["credits_from"] or date.max)

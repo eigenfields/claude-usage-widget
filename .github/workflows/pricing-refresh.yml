@@ -1,0 +1,47 @@
+# Weekly pricing refresh — runs on GitHub's infra, never on a user's machine.
+# Opens a REVIEWED pull request when list prices moved; never auto-merges.
+# The widget's runtime makes zero network calls; this workflow is the only
+# thing that ever fetches anything, and a human approves every diff.
+name: pricing refresh
+
+on:
+  schedule:
+    - cron: "17 9 * * 1"   # Mondays 09:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Sanity gate lives in the script: parse failure or implausible rates
+      # exit non-zero, the job fails, and NO pull request is opened.
+      - name: Fetch and merge current list prices
+        run: python tools/refresh_pricing.py
+
+      - name: Open pull request if pricing.json changed
+        uses: peter-evans/create-pull-request@v6
+        with:
+          title: "chore: pricing refresh"
+          commit-message: "chore: pricing refresh (automated fetch; review before merge)"
+          branch: chore/pricing-refresh
+          delete-branch: true
+          body: |
+            Automated weekly fetch of https://claude.com/pricing#api.
+
+            - Only OPEN (undated) rates of known models are touched; dated
+              periods (e.g. Sonnet 5 intro) and notes are preserved.
+            - Passed the sanity gate (anchors present, rates in band,
+              output >= input).
+
+            **Review the diff before merging — this is the brittleness
+            backstop. Never enable auto-merge on this branch.**

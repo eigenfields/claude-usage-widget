@@ -93,6 +93,15 @@ isn't visible locally; this is a floor-side estimate, never a bill. Past days
 freeze into a small internal ledger, so the month survives Claude Code's
 ~30-day transcript cleanup.
 
+Dollar figures price each model **version** at its **dated** list rate from
+[`pricing.json`](pricing.json) — Opus 4.1 bills 15/75, not the family's 5/25,
+and Sonnet 5's intro pricing ends when it ends. A weekly GitHub Action
+refreshes that file via a human-reviewed pull request (sanity-gated, never
+auto-merged); the widget itself still makes zero network calls, and a missing
+`pricing.json` just falls back to built-in standard rates. The subscription %
+gauges never use any of this — they keep a fixed family-level ruler so your
+calibration history stays comparable.
+
 ## The insights strip
 
 Under the gauges: requests and sessions for the last 24h/7d, with cost-share
@@ -140,6 +149,8 @@ your paths or usage.
 | `run.vbs` | silent launcher |
 | `config.txt` | **yours** — auto-created; optional overrides + `/usage` pastes |
 | `config.example.txt` | what the config looks like |
+| `pricing.json` | versioned/dated API list rates for the credits estimator |
+| `tools/` + `.github/` | the weekly pricing-refresh PR pipeline (CI-only) |
 | `points.json` / `state.json` | internal state, auto-managed (gitignored) |
 
 MIT license.
