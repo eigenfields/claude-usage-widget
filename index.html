@@ -20,7 +20,11 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
     --muted:#666663;   /* Cloud Dark   — meta text           */
     --focus:#5EAAEE;   /* Focus        — keyboard rings      */
     --edge:#333230;    /* hairline separators                */
+    --arc-track:#2E2D2B; /* empty gauge track — above card, below track */
     --mono:"Cascadia Code","Cascadia Mono","JetBrains Mono","IBM Plex Mono",Consolas,ui-monospace,monospace;
+    /* spacing scale — every vertical gap sits on this, except the intentional
+       12/6/3 micro-rhythm inside a gauge cell */
+    --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px;
   }
   *{ box-sizing:border-box; margin:0; padding:0; }
   html,body{ width:100vw; height:100vh; background:var(--page); color:var(--ink);
@@ -40,15 +44,15 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
 
   /* fixed height + centered content => header height never depends on font/SVG
      settle timing, and the mascot/wordmark sit centered with room above the rule */
-  header{ cursor:grab; height:54px; flex:none; display:flex; align-items:flex-start; gap:11px;
-    padding-top:4px; border-bottom:1px solid var(--track); }
+  header{ cursor:grab; height:54px; flex:none; display:flex; align-items:flex-start; gap:10px;
+    padding-top:var(--s1); border-bottom:1px solid var(--track); }
   header:active{ cursor:grabbing; }
   .mascot{ display:flex; }
   .mascot svg{ height:32px; width:32px; display:block; }
   .wordmark{ display:flex; color:var(--ink); }
   .wordmark svg{ height:18px; width:auto; display:block; }
   header .sp{ flex:1; }
-  .utag{ font-size:11px; letter-spacing:2.5px; color:var(--sub); font-weight:500; }
+  .utag{ font-size:10px; letter-spacing:3px; color:var(--muted); font-weight:500; }
   .hbtn{ background:none; border:none; cursor:pointer; color:var(--muted); display:flex;
     padding:4px; border-radius:6px; line-height:0; }
   .hbtn:hover{ color:var(--ink); }
@@ -58,46 +62,47 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
 
   /* FIXED margin below the rule (not flex-grow) => divider-to-gauges gap is
      constant regardless of viewport-settle timing; leftover space goes to footer */
-  .gauges{ flex:none; margin-top:22px; display:flex; justify-content:space-around; align-items:center; }
+  .gauges{ flex:none; margin-top:var(--s5); display:flex; justify-content:space-around; align-items:center; }
   .cell{ display:flex; flex-direction:column; align-items:center; width:146px; }
   .gauge{ width:118px; height:118px; position:relative; }
   .gauge svg{ width:100%; height:100%; display:block; }
   .arc-ghost,.arc-val{ transition:stroke-dasharray .6s cubic-bezier(.22,1,.36,1); }
   .center{ position:absolute; inset:0; display:flex; flex-direction:column;
     align-items:center; justify-content:center; pointer-events:none; }
-  .num{ font-size:27px; font-weight:700; color:var(--ink); line-height:1; letter-spacing:-.5px; }
+  /* in-cell micro-rhythm: 12 / 6 / 3 — each gap half the last (the one place
+     off-scale gaps are intentional) */
+  .num{ font-size:28px; font-weight:700; color:var(--ink); line-height:1; letter-spacing:-.5px; }
   .est{ font-size:11px; font-style:italic; color:var(--sub); margin-top:3px; display:none; }
-  .lbl{ margin-top:11px; font-size:14px; font-weight:600; color:var(--ink); letter-spacing:.3px; }
-  .m1{ font-size:13px; color:var(--sub); margin-top:4px; }
-  .m2{ font-size:13px; color:var(--muted); margin-top:2px; }
+  .lbl{ margin-top:var(--s3); font-size:14px; font-weight:600; color:var(--ink); letter-spacing:.3px; }
+  .m1{ font-size:12.5px; color:var(--sub); margin-top:6px; }
+  .m2{ font-size:12px; color:var(--muted); margin-top:3px; }
 
-  .legend{ flex:none; display:flex; justify-content:center; gap:20px; padding:6px 0 3px; margin-top:14px; }
+  .legend{ flex:none; display:flex; justify-content:center; gap:20px; padding:var(--s2) 0 var(--s1); margin-top:var(--s4); }
   .legend span{ display:flex; align-items:center; gap:7px; font-size:12.5px; color:var(--sub); }
   .sw{ width:17px; height:6px; border-radius:3px; background:var(--hot); }
   .sw.proj{ opacity:.30; }
 
   /* local behavior insights: two compact columns of labeled mini-bars */
-  .insights{ flex:none; margin-top:15px; border-top:1px solid var(--edge); padding-top:12px;
+  .insights{ flex:none; margin-top:var(--s4); border-top:1px solid var(--edge); padding-top:var(--s3);
     display:flex; gap:28px; }
-  .icol{ flex:1; min-width:0; background:#212120; padding:10px 12px; border-radius:8px; }
-  .ihead{ font-size:13px; color:var(--sub); margin-bottom:4px; letter-spacing:.2px; }
-  .irow{ display:flex; align-items:center; gap:8px; margin-top:6px; }
+  .icol{ flex:1; min-width:0; background:#212120; padding:var(--s2) var(--s3); border-radius:8px; }
+  .ihead{ font-size:13px; color:var(--ink); margin-bottom:var(--s1); letter-spacing:.2px; }
+  .irow{ display:flex; align-items:center; gap:8px; margin-top:var(--s2); }
   .ilbl{ font-size:12.5px; color:var(--ink); width:96px; flex:none; }  /* 96: mono at 12.5px */
   .itrack{ flex:1; height:7px; border-radius:3px; background:var(--track); overflow:hidden; }
   .ifill{ display:block; height:100%; border-radius:3px; background:var(--hot); }  /* Book Cloth = live;
     display:block — an inline span ignores width, so the fill never rendered */
   .ival{ font-size:12.5px; color:var(--sub); width:32px; text-align:right; flex:none;
     font-variant-numeric:tabular-nums lining-nums; }
-  .iagents{ margin-top:8px; font-size:12.5px; color:var(--sub); white-space:nowrap;
-    overflow:hidden; text-overflow:ellipsis; }
+  .iagents{ margin-top:var(--s2); font-size:12.5px; color:var(--muted); min-height:18px; }
 
-  footer{ flex:none; margin-top:16px; border-top:1px solid var(--edge); padding-top:11px; }
-  .caveat{ font-size:12px; color:var(--muted); line-height:1.45; margin-bottom:9px; }
+  footer{ flex:none; margin-top:var(--s4); border-top:1px solid var(--edge); padding-top:var(--s3); }
+  .caveat{ font-size:12px; color:var(--sub); line-height:1.5; margin-bottom:var(--s2); }
   .frow{ display:flex; align-items:center; justify-content:space-between; }
   .stamp{ font-size:12.5px; color:var(--sub); }
-  .refresh{ cursor:pointer; color:var(--hot); background:none; border:none;
+  .refresh{ cursor:pointer; color:var(--muted); background:none; border:none;
     display:flex; align-items:center; padding:4px; border-radius:6px; line-height:0; }
-  .refresh:hover{ filter:brightness(1.1); }
+  .refresh:hover{ color:var(--sub); }
   .refresh svg{ width:15px; height:15px; display:block; }
   .refresh.spin svg{ animation:spin .8s linear infinite; }
   @keyframes spin{ to{ transform:rotate(360deg); } }
@@ -185,12 +190,12 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
   const GAUGE = `
     <svg role="img" aria-label="" viewBox="0 0 128 128">
       <g transform="rotate(135 64 64)">
-        <circle cx="64" cy="64" r="54" fill="none" stroke="var(--track)"
-                stroke-width="10" stroke-linecap="round" stroke-dasharray="254.47 339.29"/>
+        <circle cx="64" cy="64" r="54" fill="none" stroke="var(--arc-track)"
+                stroke-width="7.5" stroke-linecap="round" stroke-dasharray="254.47 339.29"/>
         <circle class="arc-ghost" cx="64" cy="64" r="54" fill="none" stroke-opacity="0.30"
-                stroke-width="10" stroke-linecap="round" stroke-dasharray="0 339.29"/>
+                stroke-width="7.5" stroke-linecap="round" stroke-dasharray="0 339.29"/>
         <circle class="arc-val" cx="64" cy="64" r="54" fill="none"
-                stroke-width="10" stroke-linecap="round" stroke-dasharray="0 339.29"/>
+                stroke-width="7.5" stroke-linecap="round" stroke-dasharray="0 339.29"/>
       </g>
     </svg>
     <div class="center"><div class="num">–</div><div class="est">est.</div></div>`;
@@ -260,9 +265,11 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
         `<div class="irow"><span class="ilbl">${l}</span><span class="itrack">` +
         `<span class="ifill" style="width:${Math.min(100, v || 0)}%"></span></span>` +
         `<span class="ival">${v || 0}%</span></div>`).join('');
-      const ag = col.querySelector('.iagents');
-      ag.textContent = (x.top_agents && x.top_agents.length)   // names only — the
-        ? 'top: ' + x.top_agents.slice(0, 2).map(([a]) => a).join(' · ') : '';  // bars carry the numbers
+      const ag = col.querySelector('.iagents');   // one full name, never truncated;
+      ag.textContent = (x.top_agents && x.top_agents.length)   // bars carry the numbers
+        ? 'top: ' + x.top_agents[0][0]
+          + (x.top_agents.length > 1 ? ` +${x.top_agents.length - 1} more` : '')
+        : '';
     }
   }
 
