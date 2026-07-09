@@ -44,15 +44,17 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
 
   /* fixed height + centered content => header height never depends on font/SVG
      settle timing, and the mascot/wordmark sit centered with room above the rule */
-  header{ cursor:grab; height:54px; flex:none; display:flex; align-items:flex-start; gap:10px;
-    padding-top:var(--s1); border-bottom:1px solid var(--track); }
+  /* center, not flex-start: the mascot (32px) and wordmark (18px) must share a
+     MIDLINE — top-aligning mixed heights floats the wordmark (owner's call) */
+  header{ cursor:grab; height:54px; flex:none; display:flex; align-items:center; gap:10px;
+    border-bottom:1px solid var(--track); }
   header:active{ cursor:grabbing; }
   .mascot{ display:flex; }
   .mascot svg{ height:32px; width:32px; display:block; }
   .wordmark{ display:flex; color:var(--ink); }
   .wordmark svg{ height:18px; width:auto; display:block; }
   header .sp{ flex:1; }
-  .utag{ font-size:10px; letter-spacing:3px; color:var(--muted); font-weight:500; }
+  .utag{ font-size:10.5px; letter-spacing:3px; color:var(--ink); font-weight:600; }
   .hbtn{ background:none; border:none; cursor:pointer; color:var(--muted); display:flex;
     padding:4px; border-radius:6px; line-height:0; }
   .hbtn:hover{ color:var(--ink); }
