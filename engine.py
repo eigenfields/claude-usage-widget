@@ -415,11 +415,51 @@ def derive_point(block, T, records):
     return pt
 
 
+def _contradicts_floor(pct, implied):
+    """True when a pasted reading is impossibly LOW against what local cost
+    alone implies. Local logs are a floor (real >= local), so a reading far
+    below the floor-implied % means the provider reset/rebased its counter
+    mid-window (limits migration, promo rollover — observed 2026-07-09) and
+    the window semantics don't match: the pair would be junk. Deliberately
+    narrow — moderately-low readings are legitimate scale changes the fit
+    must LEARN, not reject."""
+    return implied >= 4.0 and pct <= max(1.0, implied / 4.0)
+
+
+def _quarantine(ptn, fits):
+    """Strip readings that contradict the local floor from a freshly derived
+    point (reset anchors are kept — they're valid regardless). Only guards
+    buckets with at least one real calibration point: a tier default must
+    never be trusted enough to reject a stranger's first paste.
+    Returns the list of dropped readings."""
+    dropped = []
+    s = ptn.get("session")
+    if s and fits["session"]["n"]:
+        f = fits["session"]
+        if _contradicts_floor(s["pct"], f["a"] * comp_cost(s["comp"]) + f["floor"]):
+            del ptn["session"]; dropped.append("session")
+    w = ptn.get("week")
+    if w:
+        f = fits["week_all"]
+        if (f["n"] and w.get("all_pct") is not None and
+                _contradicts_floor(w["all_pct"], f["a"] * comp_cost(w["comp"]) + f["floor"])):
+            del ptn["week"]; dropped.append("week")
+        else:
+            fa = fits["week_fable_A"]
+            if (fa["n"] and w.get("fable_pct") is not None and
+                    _contradicts_floor(w["fable_pct"],
+                                       fa["a"] * comp_cost(w["comp"], keep=FABLE_ONLY) + fa["floor"])):
+                w.pop("fable_pct"); dropped.append("fable")
+    return dropped
+
+
 def ingest_pastes(cfg, records, store):
     """Fold any not-yet-seen /usage paste in config.txt into the points store.
     Capture time = config.txt's save time, so only the bottom-most new block
     (the one just pasted and saved) can be timed correctly; any older unseen
-    blocks are marked seen and skipped. Returns the number of points added."""
+    blocks are marked seen and skipped. Readings that contradict the local
+    floor are quarantined (see _contradicts_floor). Returns the list of
+    quarantined readings ([] when none, also [] when nothing was ingested)."""
     seen = set(store["seen_hashes"])
     fresh, fh = [], set()
     for b in parse_usage_blocks(cfg["text"]):
@@ -427,11 +467,12 @@ def ingest_pastes(cfg, records, store):
             fresh.append(b)
             fh.add(b["hash"])
     if not fresh:
-        return 0
+        return []
     for b in fresh[:-1]:
         store["seen_hashes"].append(b["hash"])
     b = fresh[-1]
     ptn = derive_point(b, cfg["mtime"], records)
+    quarantined = _quarantine(ptn, fits_from(store, cfg["plan"]))
     store["points"].append(ptn)
     store["seen_hashes"].append(b["hash"])
     if ptn.get("session_anchor"):
@@ -439,7 +480,7 @@ def ingest_pastes(cfg, records, store):
     if ptn.get("week_anchor"):
         store["week_anchor"] = ptn["week_anchor"]
     save_points(store)
-    return 1
+    return quarantined
 
 
 def fit_through_origin(pairs):
@@ -623,7 +664,7 @@ def compute_gauges(now=None, records=None):
         since = min(since, cfg["mtime"] - timedelta(days=LOOKBACK_DAYS))
     if records is None:
         records, _, _ = load_records(logs, since)
-    ingest_pastes(cfg, records, store)
+    quarantined = ingest_pastes(cfg, records, store)
     fits = fits_from(store, cfg["plan"])
 
     anchor = None                                  # session phase = latest paste's reset
@@ -662,6 +703,9 @@ def compute_gauges(now=None, records=None):
               "so real usage can only be higher.")
     if not store["points"]:
         caveat += " Paste /usage into config.txt once to calibrate."
+    if quarantined:
+        caveat += (f" Skipped the paste's {'/'.join(quarantined)} reading(s) — "
+                   "they contradict local logs (provider likely reset its counters).")
     return {
         "gauges": [
             {"key": "session", "label": "Session", "sub": "5-hour window",

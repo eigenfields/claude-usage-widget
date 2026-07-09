@@ -56,7 +56,10 @@ It works immediately, with two honest hedges until you calibrate:
 
 Each paste tightens the fit and re-pins your session/weekly reset times. The
 `est.` badge clears once three varied readings are in. After that, paste again
-only when you feel like truing it up — the widget never nags.
+only when you feel like truing it up — the widget never nags. One safety net:
+a reading that contradicts your own logs (it happens — Anthropic occasionally
+resets or rebases the counters mid-window during limit migrations) is skipped
+automatically, with a note in the footer.
 
 ## How the estimate works (one paragraph)
 
