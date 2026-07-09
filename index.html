@@ -84,7 +84,8 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
   .irow{ display:flex; align-items:center; gap:8px; margin-top:6px; }
   .ilbl{ font-size:12.5px; color:var(--ink); width:96px; flex:none; }  /* 96: mono at 12.5px */
   .itrack{ flex:1; height:7px; border-radius:3px; background:var(--track); overflow:hidden; }
-  .ifill{ height:100%; border-radius:3px; background:var(--hot); }     /* Book Cloth = live */
+  .ifill{ display:block; height:100%; border-radius:3px; background:var(--hot); }  /* Book Cloth = live;
+    display:block — an inline span ignores width, so the fill never rendered */
   .ival{ font-size:12.5px; color:var(--sub); width:32px; text-align:right; flex:none;
     font-variant-numeric:tabular-nums lining-nums; }
   .iagents{ margin-top:8px; font-size:12.5px; color:var(--sub); white-space:nowrap;
