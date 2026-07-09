@@ -30,6 +30,10 @@ Collapsed to the pill (header chevron), it sits in the corner of your eye:
 
 ## Install (30 seconds)
 
+The widget itself is Windows-first (WebView2 window, tray icon, global hotkey);
+`engine.py` — the data layer, including `py engine.py` diagnostics — runs
+anywhere.
+
 1. Python 3.9+ ([python.org](https://www.python.org/downloads/) installer; keep
    the "py launcher" option checked).
 2. `py -m pip install -r requirements.txt`
@@ -68,11 +72,14 @@ automatically, with a note in the footer.
 ## How the estimate works (one paragraph)
 
 The engine dedups your transcripts to true billable requests (one per
-`requestId` — verified to reproduce `/usage`'s own request count within ~1%),
-collapses each request's token mix (input, output, cache reads/writes) into one
-cost-equivalent dollar number using per-model pricing, sums that over the live
-session/week windows, and scales cost→% with a per-gauge factor fitted through
-the origin from your pasted `/usage` readings. Reset times come from the pastes
+`requestId`, keeping each request's **final** usage snapshot — transcripts
+write progressive snapshots as a response streams — verified to reproduce
+`/usage`'s own request count within ~1%), collapses each request's token mix
+(input, output, cache reads/writes) into one cost-equivalent dollar number
+using per-model pricing, sums that over the live session/week windows, and
+scales cost→% with a per-gauge factor fitted through the origin from your
+pasted `/usage` readings (the freshest twelve, so the scale can track a
+provider limits change). Reset times come from the pastes
 too: the 5-hour session grid re-anchors intelligently across idle gaps, and all
 window math is UTC-absolute (DST-safe).
 
@@ -117,7 +124,8 @@ subagent-heavy sessions"), so expect those two numbers to differ.
 ## Reading the gauges
 
 - solid arc = now · faint arc = straight-line projection to the reset (appears
-  once ≥8% of the window has elapsed) · red = projected ≥90% or over 100 now
+  once ≥8% of the window has elapsed) · red = projected ≥90%, or pegged at 100
+  right now
 - `est.` = provisional (few calibration points, or an under-corroborated window)
 - `~` before a session reset = the 5h window's phase is uncertain (it may have
   started off-device, or followed a long idle gap)
@@ -132,7 +140,6 @@ subagent-heavy sessions"), so expect those two numbers to differ.
 | all zeros, `0 req/7d` | logs found but empty — run something in Claude Code first |
 | nothing appears on double-click | run `py app.py` in a terminal to see the error — usually a missing `py` launcher (Microsoft Store Python): use `pythonw app.py`, or install the WebView2 runtime (preinstalled on Windows 11) |
 | numbers look low | that's the floor: claude.ai / mobile / other-machine usage is invisible to local logs |
-| Fable gauge seems to track Opus too | flip `FABLE_HYP` in `engine.py` (`"A"` = Fable-only, `"B"` = Opus-class) |
 
 ## Privacy
 
@@ -140,6 +147,11 @@ Everything stays on your machine. Your personal files — `config.txt` (logs pat
 + pasted readings), `points.json` (derived calibration points), `state.json`
 (window state) — are gitignored, so a fork or PR can never accidentally ship
 your paths or usage.
+
+One scope note for verify-by-inspection readers: the window is rendered by
+Microsoft's WebView2 runtime, which does its own OS-level telemetry like any
+Edge component — that's outside this app's code, which makes zero network
+calls of its own.
 
 ## Files
 
@@ -153,6 +165,7 @@ your paths or usage.
 | `config.example.txt` | what the config looks like |
 | `pricing.json` | versioned/dated API list rates for the credits estimator |
 | `tools/` + `.github/` | the weekly pricing-refresh PR pipeline (CI-only) |
+| `tests/` | pytest pins for the empirical rules (dev-only: `py -m pytest tests/`) |
 | `points.json` / `state.json` | internal state, auto-managed (gitignored) |
 
 MIT license.
