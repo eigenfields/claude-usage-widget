@@ -31,8 +31,8 @@ ICON = HERE / "Branding" / "ClaudeCode_Icon.ico"
 HTML = HERE / "index.html"
 STATE = HERE / "state.json"
 BG = "#191919"                                          # Slate Dark page
-EXPANDED = (520, 450)   # generous initial height; JS fit_height trims to the card
-COLLAPSED = (340, 62)
+EXPANDED = (660, 560)   # generous initial height; JS fit_height trims to the card
+COLLAPSED = (400, 62)
 
 
 def read_state():

@@ -1,8 +1,12 @@
 # Claude Usage Widget
 
-An always-on-top desktop gauge for **Claude Code** usage — the same three numbers
-`/usage` shows (Session · Week · Fable), estimated entirely from the transcript
-logs already on your machine. Glance at a widget instead of typing `/usage`.
+An always-on-top desktop gauge for **Claude Code** usage — the three numbers
+`/usage` shows (Session · Week · the premium-model week, labeled whatever your
+`/usage` calls it), plus a **usage-credits estimator** (your month-to-date
+Fable spend priced at real API rates, tracked against your cap) and a compact
+strip of local behavior insights (requests, sessions, subagent / big-context /
+long-session shares). All of it estimated entirely from the transcript logs
+already on your machine. Glance at a widget instead of typing `/usage`.
 
 > **Unofficial.** Not affiliated with or endorsed by Anthropic.
 
@@ -71,6 +75,29 @@ session/week windows, and scales cost→% with a per-gauge factor fitted through
 the origin from your pasted `/usage` readings. Reset times come from the pastes
 too: the 5-hour session grid re-anchors intelligently across idle gaps, and all
 window math is UTC-absolute (DST-safe).
+
+## The Credits gauge (Fable pay-per-use)
+
+Since Fable 5 bills **usage credits at standard API rates** outside its included
+window, the fourth dial prices your local Fable token record at those rates —
+including the API's full cache-read pricing — and shows estimated dollars for
+the current credits month. Three optional `config.txt` keys tune it:
+`credits_cap` (your monthly cap → the dial fills against it and projects to the
+reset), `credits_from` (the date Fable started billing credits for you), and
+`credits_reset_day` (default 1). It's always marked `est.` — real credit billing
+isn't visible locally, so this is your floor-side estimate, not a bill. Past
+days are frozen into a small internal ledger, so the month survives Claude
+Code's ~30-day transcript cleanup.
+
+## The insights strip
+
+Under the gauges: requests and sessions for the last 24h/7d, with cost-share
+mini-bars for subagent work, big-context work (≥150k), and long sessions
+(8h+), plus your top subagent types. Counts line up with `/usage`'s own panel;
+the share definitions are deliberately the widget's own — *direct cost shares*
+(what fraction of your spend-equivalent was literally subagent requests),
+which is sharper than `/usage`'s session-bucket attribution ("came from
+subagent-heavy sessions"), so expect those two numbers to differ.
 
 ## Reading the gauges
 

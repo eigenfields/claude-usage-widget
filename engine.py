@@ -16,7 +16,7 @@ Self-contained data layer (no separate calibrate step):
     % = a*cost fit recomputes live; zero pastes -> plan-tier default scales
 """
 import sys, os, re, json, glob, math, hashlib
-from datetime import datetime, timezone, timedelta, time
+from datetime import datetime, timezone, timedelta, time, date
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -39,6 +39,10 @@ UTC = timezone.utc
 PRICE = {"fable": (10.0, 50.0), "opus": (5.0, 25.0),
          "sonnet": (3.0, 15.0), "haiku": (1.0, 5.0)}
 CR, CW = 0.01, 1.25
+# Usage credits bill at STANDARD API rates — including the API's 10x-higher
+# cache-read weight — so the credits estimator prices with these, never CR/CW.
+API_CR, API_CW = 0.10, 1.25
+MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
 SESSION_HOURS = 5
 # A session block's first local request can legitimately lag its start by normal
 # think-time; only a lag beyond this marks the window soft (off-device/mid-block
@@ -73,6 +77,15 @@ CONFIG_TEMPLATE = """\
 
 logs_path =
 plan = max20x
+
+# credits (optional) : tunes the Fable usage-credits estimator gauge.
+#   credits_cap       = your monthly usage-credits spend cap in dollars, e.g. 100
+#   credits_from      = the date Fable started billing usage credits for you
+#                       (YYYY-MM-DD; blank = start of the current credits month)
+#   credits_reset_day = day of month your credits reset (default 1)
+credits_cap =
+credits_from =
+credits_reset_day = 1
 
 # ---------------- calibration: paste /usage output below ----------------
 # Run /usage in Claude Code, copy the WHOLE output, paste it below this line,
@@ -177,12 +190,17 @@ def load_records(logs_dir, since=None):
                 if price_for(model) is None:
                     unknown_models[model] = unknown_models.get(model, 0) + 1
                 u = m["usage"]
+                fresh = u.get("input_tokens", 0) or 0
+                cread = u.get("cache_read_input_tokens", 0) or 0
+                cwrite = u.get("cache_creation_input_tokens", 0) or 0
                 seen[key] = dict(
                     ts=parse_ts(ts), model=model, is_sub=bool(d.get("isSidechain")),
-                    fresh_input=u.get("input_tokens", 0) or 0,
+                    sid=d.get("sessionId"), agent=d.get("attributionAgent"),
+                    ctx=fresh + cread + cwrite,
+                    fresh_input=fresh,
                     output=u.get("output_tokens", 0) or 0,
-                    cache_read=u.get("cache_read_input_tokens", 0) or 0,
-                    cache_creation=u.get("cache_creation_input_tokens", 0) or 0,
+                    cache_read=cread,
+                    cache_creation=cwrite,
                 )
     return list(seen.values()), files, unknown_models
 
@@ -222,17 +240,52 @@ def comp_over(records, start_utc, end_utc):
             c[2] += r["cache_creation"]; c[3] += r["output"]
     return comp
 
-def comp_cost(comp, keep=None):
-    """Cost-equivalent $ of a stored composition under the CURRENT weights —
-    calibration pairs are derived from composition at fit time, so retuning
-    CR/CW/prices re-fits every historical point with no log access needed."""
+def comp_cost(comp, keep=None, cr=None, cw=None):
+    """Cost-equivalent $ of a stored composition — under the subscription
+    limiter weights by default (calibration pairs derive from composition at
+    fit time, so retuning CR/CW/prices re-fits all history without logs), or
+    under explicit weights (cr=API_CR, cw=API_CW prices a composition at what
+    usage credits would actually bill)."""
+    cr = CR if cr is None else cr
+    cw = CW if cw is None else cw
     tot = 0.0
     for fam, c in (comp or {}).items():
         if keep is not None and fam not in keep:
             continue
         pin, pout = PRICE[fam]
-        tot += pin * (c[0] + CR * c[1] + CW * c[2]) + pout * c[3]
+        tot += pin * (c[0] + cr * c[1] + cw * c[2]) + pout * c[3]
     return tot * 1e-6
+
+
+def insights(records, now):
+    """Local recomputation of /usage's 'behaviors' panel over 24h and 7d:
+    request/session counts plus cost-equivalent shares (subagent work, big-
+    context work, long-running sessions, top subagent types). Sessions =
+    distinct sessionIds; shares are of cost, not request count."""
+    out = {}
+    for key, span in (("d1", timedelta(hours=24)), ("d7", timedelta(days=7))):
+        rs = [r for r in records if r["ts"] >= now - span]
+        tot = sum(rec_cost(r) for r in rs) or 1.0
+        sess = {}
+        for r in rs:
+            s = sess.setdefault(r["sid"], [r["ts"], r["ts"]])
+            if r["ts"] < s[0]: s[0] = r["ts"]
+            if r["ts"] > s[1]: s[1] = r["ts"]
+        long_ids = {k for k, (a, b) in sess.items() if b - a >= timedelta(hours=8)}
+        agents = {}
+        for r in rs:
+            if r["agent"]:
+                agents[r["agent"]] = agents.get(r["agent"], 0.0) + rec_cost(r)
+        out[key] = {
+            "req": len(rs),
+            "sessions": len(sess),
+            "sub_share": round(100 * sum(rec_cost(r) for r in rs if r["is_sub"]) / tot),
+            "big_ctx_share": round(100 * sum(rec_cost(r) for r in rs if r["ctx"] >= 150_000) / tot),
+            "long_share": round(100 * sum(rec_cost(r) for r in rs if r["sid"] in long_ids) / tot),
+            "top_agents": [[a, round(100 * c / tot)] for a, c in
+                           sorted(agents.items(), key=lambda kv: -kv[1])[:3] if c / tot >= 0.005],
+        }
+    return out
 
 FABLE_ONLY = {"fable"}          # hypothesis A model set
 PREMIUM = {"fable", "opus"}     # hypothesis B model set
@@ -254,16 +307,31 @@ def load_config():
         mtime = datetime.fromtimestamp(CONFIG_PATH.stat().st_mtime, tz=UTC)
     except OSError:
         text, mtime = "", datetime.now(UTC)
-    cfg = {"logs_path": "", "plan": "max20x", "text": text, "mtime": mtime}
+    cfg = {"logs_path": "", "plan": "max20x", "credits_cap": "",
+           "credits_from": "", "credits_reset_day": "1", "text": text, "mtime": mtime}
     for line in text.splitlines():
         if line.lstrip().startswith("#"):
             continue
-        m = re.match(r"\s*(logs_path|plan)\s*=\s*(.*?)\s*$", line, re.I)
+        m = re.match(r"\s*(logs_path|plan|credits_cap|credits_from|credits_reset_day)"
+                     r"\s*=\s*(.*?)\s*$", line, re.I)
         if m:
             cfg[m.group(1).lower()] = m.group(2)
     cfg["plan"] = (cfg["plan"] or "max20x").lower().replace(" ", "")
     if cfg["plan"] not in TIER_MULT:
         cfg["plan"] = "max20x"
+    try:
+        cap = float(str(cfg["credits_cap"]).replace("$", "").replace(",", "").strip())
+        cfg["credits_cap"] = cap if cap > 0 else None
+    except (ValueError, TypeError):
+        cfg["credits_cap"] = None
+    try:
+        cfg["credits_from"] = date.fromisoformat(str(cfg["credits_from"]).strip())
+    except (ValueError, TypeError):
+        cfg["credits_from"] = None
+    try:
+        cfg["credits_reset_day"] = max(1, min(28, int(str(cfg["credits_reset_day"]).strip())))
+    except (ValueError, TypeError):
+        cfg["credits_reset_day"] = 1
     return cfg
 
 
@@ -411,6 +479,7 @@ def derive_point(block, T, records):
                     w["all_pct"] = wk["pct"]
                 if prem:
                     w["fable_pct"] = prem["pct"]
+                    w["label"] = prem.get("label")   # whatever /usage calls it
                 pt["week"] = w
     return pt
 
@@ -479,6 +548,8 @@ def ingest_pastes(cfg, records, store):
         store["session_anchor"] = ptn["session_anchor"]
     if ptn.get("week_anchor"):
         store["week_anchor"] = ptn["week_anchor"]
+    if (ptn.get("week") or {}).get("label"):
+        store["premium_label"] = ptn["week"]["label"]   # gauge 3 follows /usage
     save_points(store)
     return quarantined
 
@@ -525,6 +596,50 @@ def fits_from(store, plan):
     return {k: (fit_through_origin(v) if v else
                 {"a": BASE_A[k] * mult, "sigma": None, "floor": 0.0, "n": 0})
             for k, v in pairs.items()}
+
+
+# ---- usage-credits month + daily ledger ---------------------------------------
+def _month_step(d, months):
+    y, m = d.year, d.month - 1 + months
+    return date(y + m // 12, m % 12 + 1, d.day)
+
+def credits_period(now_utc, reset_day=1):
+    """[start, end) of the current usage-credits month: local midnight on the
+    reset day (the billing timezone isn't knowable locally — an honest, clearly
+    'est.' approximation)."""
+    tz = local_tz()
+    loc = now_utc.astimezone(tz)
+    sd = date(loc.year, loc.month, min(reset_day, 28))
+    if loc.date() < sd:
+        sd = _month_step(sd, -1)
+    ed = _month_step(sd, 1)
+    def mk(dd):
+        return datetime.combine(dd, time(0, 0), tzinfo=tz).astimezone(UTC)
+    return mk(sd), mk(ed)
+
+def update_day_ledger(store, records, from_utc, now_utc):
+    """Freeze a per-day token composition for every CLOSED local day since
+    `from_utc` (immutable once written), so the monthly credits estimate never
+    needs logs older than yesterday — and survives the ~30-day transcript
+    cleanup mid-month. Returns True when the store changed."""
+    tz = local_tz()
+    led = store.setdefault("day_comps", {})
+    d = from_utc.astimezone(tz).date()
+    today = now_utc.astimezone(tz).date()
+    changed = False
+    while d < today:
+        k = d.isoformat()
+        if k not in led:
+            s = datetime.combine(d, time(0, 0), tzinfo=tz).astimezone(UTC)
+            e = datetime.combine(d + timedelta(days=1), time(0, 0), tzinfo=tz).astimezone(UTC)
+            led[k] = comp_over(records, s, e)
+            changed = True
+        d += timedelta(days=1)
+    horizon = (today - timedelta(days=62)).isoformat()
+    for k in [k for k in led if k < horizon]:
+        del led[k]
+        changed = True
+    return changed
 
 
 # ---- window boundaries -------------------------------------------------------
@@ -662,9 +777,26 @@ def compute_gauges(now=None, records=None):
     seen = set(store["seen_hashes"])
     if any(b["hash"] not in seen for b in parse_usage_blocks(cfg["text"])):
         since = min(since, cfg["mtime"] - timedelta(days=LOOKBACK_DAYS))
+    # ...and far enough to freeze any credits-month days the ledger is missing
+    # (first run reaches back to the period start; steady state adds nothing).
+    tzl = local_tz()
+    cp_start, cp_end = credits_period(now, cfg["credits_reset_day"])
+    c_from = cp_start
+    if cfg["credits_from"]:
+        c_from = max(c_from, datetime.combine(cfg["credits_from"], time(0, 0),
+                                              tzinfo=tzl).astimezone(UTC))
+    led = store.get("day_comps", {})
+    dmiss = c_from.astimezone(tzl).date()
+    today_l = now.astimezone(tzl).date()
+    while dmiss < today_l and dmiss.isoformat() in led:
+        dmiss += timedelta(days=1)
+    if dmiss < today_l:
+        since = min(since, datetime.combine(dmiss, time(0, 0), tzinfo=tzl).astimezone(UTC))
     if records is None:
         records, _, _ = load_records(logs, since)
     quarantined = ingest_pastes(cfg, records, store)
+    if update_day_ledger(store, records, c_from, now):
+        save_points(store)
     fits = fits_from(store, cfg["plan"])
 
     anchor = None                                  # session phase = latest paste's reset
@@ -694,11 +826,36 @@ def compute_gauges(now=None, records=None):
         return bool((proj is not None and proj >= 90) or pt > 100)
 
     week_reset = _fmt_week(w_end) if w_end else "unknown"
+
+    # ---- Fable usage-credits estimate: month-to-date, priced at API rates ----
+    cred = 0.0
+    dd = c_from.astimezone(tzl).date()
+    while dd < today_l:
+        c = store.get("day_comps", {}).get(dd.isoformat())
+        if c:
+            cred += comp_cost(c, keep=FABLE_ONLY, cr=API_CR, cw=API_CW)
+        dd += timedelta(days=1)
+    live_from = max(c_from, datetime.combine(today_l, time(0, 0), tzinfo=tzl).astimezone(UTC))
+    if live_from < now:
+        cred += comp_cost(comp_over(records, live_from, now),
+                          keep=FABLE_ONLY, cr=API_CR, cw=API_CW)
+    cap = cfg["credits_cap"]
+    c_pt = round(min(100.0, 100.0 * cred / cap)) if cap else 0
+    c_proj = None
+    if cap and now > c_from:
+        fr = (now - c_from).total_seconds() / (cp_end - c_from).total_seconds()
+        if 0.08 <= fr < 1.0 and cred > 0:
+            p = round(100.0 * (cred / fr) / cap)
+            c_proj = min(p, 200) if p > c_pt else None
+    c_danger = bool(cap and (cred >= cap or (c_proj or 0) >= 90))
+    dollars = f"${cred:,.2f}" if cred < 10 else f"${cred:,.0f}"
+    cp_end_l = cp_end.astimezone(tzl)
+
+    plabel = ((store.get("premium_label") or "fable").strip().title() or "Fable")
     req7 = sum(1 for r in records if r["ts"] >= now - timedelta(days=7))
     lu = now.astimezone(local_tz())
-    mon = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][lu.month-1]
     h12 = lu.hour % 12 or 12
-    updated = f"{mon} {lu.day}, {h12}:{lu.minute:02d}{'am' if lu.hour < 12 else 'pm'}"
+    updated = f"{MON[lu.month-1]} {lu.day}, {h12}:{lu.minute:02d}{'am' if lu.hour < 12 else 'pm'}"
     caveat = ("Local Claude Code logs only — excludes web/mobile/other devices, "
               "so real usage can only be higher.")
     if not store["points"]:
@@ -720,14 +877,21 @@ def compute_gauges(now=None, records=None):
              # the window is the trailing 7d (an over-count) and the reset unknown.
              "point": ap, "projected": w_proj, "danger": _danger(ap, w_proj),
              "provisional": apv or w_soft, "reset": week_reset},
-            {"key": "week_fable", "label": "Fable", "sub": "weekly",
+            {"key": "week_fable", "label": plabel, "sub": "weekly",
              "point": fp, "projected": f_proj, "danger": _danger(fp, f_proj),
              "provisional": fpv or w_soft, "reset": week_reset},
+            # always provisional: real credit billing is invisible locally — this
+            # prices the local token record at API rates (a floor, like the rest)
+            {"key": "credits", "label": "Credits", "sub": "Fable, monthly",
+             "point": c_pt, "projected": c_proj, "danger": c_danger,
+             "provisional": True, "dollars": dollars, "cap": cap,
+             "reset": f"{MON[cp_end_l.month-1]} {cp_end_l.day}"},
         ],
         "n_snapshots": len(store["points"]),
         "req_7d": req7,
         "updated": updated,
         "logs_dir": str(logs),
+        "insights": insights(records, now),
         "caveat": caveat,
     }
 

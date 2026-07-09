@@ -59,7 +59,7 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
   /* FIXED margin below the rule (not flex-grow) => divider-to-gauges gap is
      constant regardless of viewport-settle timing; leftover space goes to footer */
   .gauges{ flex:none; margin-top:22px; display:flex; justify-content:space-around; align-items:center; }
-  .cell{ display:flex; flex-direction:column; align-items:center; width:150px; }
+  .cell{ display:flex; flex-direction:column; align-items:center; width:146px; }
   .gauge{ width:118px; height:118px; position:relative; }
   .gauge svg{ width:100%; height:100%; display:block; }
   .arc-ghost,.arc-val{ transition:stroke-dasharray .6s cubic-bezier(.22,1,.36,1); }
@@ -75,6 +75,20 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
   .legend span{ display:flex; align-items:center; gap:7px; font-size:11px; color:var(--sub); }
   .sw{ width:15px; height:5px; border-radius:3px; background:var(--hot); }
   .sw.proj{ opacity:.30; }
+
+  /* local behavior insights: two compact columns of labeled mini-bars */
+  .insights{ flex:none; margin-top:15px; border-top:1px solid var(--edge); padding-top:12px;
+    display:flex; gap:28px; }
+  .icol{ flex:1; min-width:0; }
+  .ihead{ font-size:12px; color:var(--sub); margin-bottom:4px; letter-spacing:.2px; }
+  .irow{ display:flex; align-items:center; gap:8px; margin-top:6px; }
+  .ilbl{ font-size:11px; color:var(--muted); width:82px; flex:none; }
+  .itrack{ flex:1; height:4px; border-radius:2px; background:var(--track); overflow:hidden; }
+  .ifill{ height:100%; border-radius:2px; background:var(--soft); }
+  .ival{ font-size:11px; color:var(--sub); width:32px; text-align:right; flex:none;
+    font-variant-numeric:tabular-nums lining-nums; }
+  .iagents{ margin-top:8px; font-size:11px; color:var(--muted); white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis; }
 
   footer{ flex:none; margin-top:16px; border-top:1px solid var(--edge); padding-top:11px; }
   .caveat{ font-size:12px; color:var(--muted); line-height:1.45; margin-bottom:9px; }
@@ -114,6 +128,7 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
       <span class="pp" data-key="session"><span class="k">S</span>–</span>
       <span class="pp" data-key="week_all"><span class="k">W</span>–</span>
       <span class="pp" data-key="week_fable"><span class="k">F</span>–</span>
+      <span class="pp" data-key="credits"><span class="k">$</span>–</span>
     </div>
     <button class="pexpand" aria-label="Expand usage widget to full card"
             onmousedown="event.stopPropagation()" onclick="setCollapsed(false)">
@@ -141,11 +156,18 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
         <div class="lbl">Week</div><div class="m1">all models</div><div class="m2 reset"></div></div>
       <div class="cell" id="g-week_fable"><div class="gauge"></div>
         <div class="lbl">Fable</div><div class="m1">weekly</div><div class="m2 reset"></div></div>
+      <div class="cell" id="g-credits"> <div class="gauge"></div>
+        <div class="lbl">Credits</div><div class="m1">Fable, monthly</div><div class="m2 reset"></div></div>
     </div>
 
     <div class="legend" aria-hidden="true">
       <span><span class="sw"></span>now</span>
       <span id="leg-proj"><span class="sw proj"></span>projected</span>
+    </div>
+
+    <div class="insights">
+      <div class="icol" id="ins-d1"><div class="ihead"></div><div class="ibars"></div><div class="iagents"></div></div>
+      <div class="icol" id="ins-d7"><div class="ihead"></div><div class="ibars"></div><div class="iagents"></div></div>
     </div>
 
     <footer>
@@ -159,7 +181,6 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
 
 <script>
   const C = 339.29, ARC270 = 254.47;        // r=54 circumference; 270° visible arc
-  const PILL_KEY = { session:'S', week_all:'W', week_fable:'F' };
   const GAUGE = `
     <svg role="img" aria-label="" viewBox="0 0 128 128">
       <g transform="rotate(135 64 64)">
@@ -194,26 +215,53 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
       } else {
         ghost.style.display = 'none';
       }
+      const isCredits = g.key === 'credits';
+      const center = isCredits ? g.dollars : g.point + '%';
       const num = cell.querySelector('.num');
-      num.textContent = g.point + '%';
+      num.textContent = center;
+      num.style.fontSize = center.length > 5 ? '21px' : '';   // "$1,234" still fits
       num.style.color = g.danger ? 'var(--error)' : 'var(--ink)';
+      cell.querySelector('.lbl').textContent = g.label;        // server-driven:
+      cell.querySelector('.m1').textContent = g.sub;           // Fable -> Opus, etc.
       cell.querySelector('.est').style.display = g.provisional ? 'block' : 'none';
       cell.querySelector('.reset').textContent = 'resets ' + g.reset;
       cell.querySelector('.gauge svg').setAttribute('aria-label',
-        `${g.label}: ${g.point}% used${g.provisional ? ' (estimated)' : ''}` +
+        `${g.label}: ${center} used${g.provisional ? ' (estimated)' : ''}` +
         (hasGhost ? `, projected ${g.projected}%` : '') + `, resets ${g.reset}`);
       const pp = document.querySelector('.pp[data-key="' + g.key + '"]');
       if(pp){
-        pp.innerHTML = `<span class="k">${PILL_KEY[g.key]}</span>${g.point}%`;
+        const k = isCredits ? '$' : (g.label || '?').charAt(0);
+        const v = isCredits ? (g.dollars || '–').replace('$', '') : g.point + '%';
+        pp.innerHTML = `<span class="k">${k}</span>${v}`;
         pp.style.color = g.danger ? 'var(--error)' : 'var(--ink)';   // uniform Ivory; red only on danger
-        pp.setAttribute('aria-label', `${g.label} ${g.point}%`);
+        pp.setAttribute('aria-label', `${g.label} ${isCredits ? g.dollars : g.point + '%'}`);
       }
     });
+    paintInsights(d.insights);
     const lp = document.getElementById('leg-proj');
     if(lp) lp.style.display = anyGhost ? 'flex' : 'none';    // no projected swatch without an arc
     document.getElementById('stamp').textContent =
       'updated ' + d.updated + '  ·  ' + d.req_7d.toLocaleString() + ' req/7d';
     document.getElementById('caveat').textContent = d.caveat;
+  }
+
+  function paintInsights(ins){
+    if(!ins) return;
+    for(const [id, title, x] of [['ins-d1', 'Last 24h', ins.d1], ['ins-d7', 'Last 7d', ins.d7]]){
+      const col = document.getElementById(id);
+      if(!col || !x) continue;
+      col.querySelector('.ihead').textContent =
+        `${title} · ${x.req.toLocaleString()} req · ${x.sessions} session${x.sessions === 1 ? '' : 's'}`;
+      const rows = [['subagents', x.sub_share], ['≥150k ctx', x.big_ctx_share],
+                    ['8h+ sessions', x.long_share]];
+      col.querySelector('.ibars').innerHTML = rows.map(([l, v]) =>
+        `<div class="irow"><span class="ilbl">${l}</span><span class="itrack">` +
+        `<span class="ifill" style="width:${Math.min(100, v || 0)}%"></span></span>` +
+        `<span class="ival">${v || 0}%</span></div>`).join('');
+      const ag = col.querySelector('.iagents');
+      ag.textContent = (x.top_agents && x.top_agents.length)
+        ? 'top: ' + x.top_agents.map(([a, p]) => `${a} ${p}%`).join(' · ') : '';
+    }
   }
 
   async function doRefresh(){
