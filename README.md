@@ -1,12 +1,12 @@
 # Claude Usage Widget
 
-An always-on-top desktop gauge for **Claude Code** usage — the three numbers
-`/usage` shows (Session · Week · the premium-model week, labeled whatever your
-`/usage` calls it), plus a **usage-credits estimator** (your month-to-date
-Fable spend priced at real API rates, tracked against your cap) and a compact
-strip of local behavior insights (requests, sessions, subagent / big-context /
-long-session shares). All of it estimated entirely from the transcript logs
-already on your machine. Glance at a widget instead of typing `/usage`.
+An always-on-top desktop gauge for **Claude Code** usage — Session · Week ·
+weekly Opus share, plus a **Usage Credits estimator** (what you're plausibly
+being billed *past* your plan, at real API rates, against your monthly cap)
+and a compact strip of local behavior insights (requests, sessions, subagent /
+big-context / long-session shares). All of it estimated entirely from the
+transcript logs already on your machine. Glance at a widget instead of typing
+`/usage`.
 
 > **Unofficial.** Not affiliated with or endorsed by Anthropic.
 
@@ -76,18 +76,22 @@ the origin from your pasted `/usage` readings. Reset times come from the pastes
 too: the 5-hour session grid re-anchors intelligently across idle gaps, and all
 window math is UTC-absolute (DST-safe).
 
-## The Credits gauge (Fable pay-per-use)
+## The Usage Credits gauge
 
-Since Fable 5 bills **usage credits at standard API rates** outside its included
-window, the fourth dial prices your local Fable token record at those rates —
-including the API's full cache-read pricing — and shows estimated dollars for
-the current credits month. Three optional `config.txt` keys tune it:
-`credits_cap` (your monthly cap → the dial fills against it and projects to the
-reset), `credits_from` (the date Fable started billing credits for you), and
-`credits_reset_day` (default 1). It's always marked `est.` — real credit billing
-isn't visible locally, so this is your floor-side estimate, not a bill. Past
-days are frozen into a small internal ledger, so the month survives Claude
-Code's ~30-day transcript cleanup.
+Usage credits are what you pay **past** your plan's included allowance, at
+standard API rates — in-plan usage costs $0 at the margin and reads as $0 here,
+on every tier. The dial estimates two billing routes for the current credits
+month: **excluded-model billing** (once Fable leaves your plan — set
+`credits_from` to that date; blank means it's still included and bills $0) and
+**in-plan overage** (usage past your calibrated weekly budget, re-priced at API
+rates — computed day-by-day, marked `~`, and deliberately under-claiming: it
+never invents a boundary from uncalibrated defaults and doesn't model
+session-cap crossings). The subtitle breaks the total out per model, `est.`
+where estimated. `credits_cap` fills the dial and drives the projection;
+`credits_reset_day` defaults to the 1st. Always badged `est.` — real billing
+isn't visible locally; this is a floor-side estimate, never a bill. Past days
+freeze into a small internal ledger, so the month survives Claude Code's
+~30-day transcript cleanup.
 
 ## The insights strip
 

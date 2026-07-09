@@ -12,10 +12,11 @@
 logs_path =
 plan = max20x
 
-# credits (optional) : tunes the Fable usage-credits estimator gauge.
+# credits (optional) : tunes the Usage Credits estimator gauge.
 #   credits_cap       = your monthly usage-credits spend cap in dollars, e.g. 100
-#   credits_from      = the date Fable started billing usage credits for you
-#                       (YYYY-MM-DD; blank = start of the current credits month)
+#   credits_from      = the date Fable left your plan and started billing usage
+#                       credits (YYYY-MM-DD). BLANK = Fable is still included in
+#                       your plan, so it bills $0 here.
 #   credits_reset_day = day of month your credits reset (default 1)
 credits_cap =
 credits_from =

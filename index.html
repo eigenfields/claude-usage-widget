@@ -127,7 +127,7 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
     <div class="ppgroup">
       <span class="pp" data-key="session"><span class="k">S</span>–</span>
       <span class="pp" data-key="week_all"><span class="k">W</span>–</span>
-      <span class="pp" data-key="week_fable"><span class="k">F</span>–</span>
+      <span class="pp" data-key="week_opus"><span class="k">O</span>–</span>
       <span class="pp" data-key="credits"><span class="k">$</span>–</span>
     </div>
     <button class="pexpand" aria-label="Expand usage widget to full card"
@@ -154,10 +154,10 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
         <div class="lbl">Session</div><div class="m1">5-hour window</div><div class="m2 reset"></div></div>
       <div class="cell" id="g-week_all"> <div class="gauge"></div>
         <div class="lbl">Week</div><div class="m1">all models</div><div class="m2 reset"></div></div>
-      <div class="cell" id="g-week_fable"><div class="gauge"></div>
-        <div class="lbl">Fable</div><div class="m1">weekly</div><div class="m2 reset"></div></div>
+      <div class="cell" id="g-week_opus"><div class="gauge"></div>
+        <div class="lbl">Opus</div><div class="m1">weekly</div><div class="m2 reset"></div></div>
       <div class="cell" id="g-credits"> <div class="gauge"></div>
-        <div class="lbl">Credits</div><div class="m1">Fable, monthly</div><div class="m2 reset"></div></div>
+        <div class="lbl">Usage Credits</div><div class="m1"></div><div class="m2 reset"></div></div>
     </div>
 
     <div class="legend" aria-hidden="true">
@@ -219,7 +219,8 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
       const center = isCredits ? g.dollars : g.point + '%';
       const num = cell.querySelector('.num');
       num.textContent = center;
-      num.style.fontSize = center.length > 5 ? '21px' : '';   // "$1,234" still fits
+      num.style.fontSize = center.length > 8 ? '16px' : center.length > 6 ? '19px'
+                         : center.length > 5 ? '21px' : '';   // width-aware: "$10,000" fits
       num.style.color = g.danger ? 'var(--error)' : 'var(--ink)';
       cell.querySelector('.lbl').textContent = g.label;        // server-driven:
       cell.querySelector('.m1').textContent = g.sub;           // Fable -> Opus, etc.
@@ -259,8 +260,8 @@ if(new URLSearchParams(location.search).get('c')==='1')document.documentElement.
         `<span class="ifill" style="width:${Math.min(100, v || 0)}%"></span></span>` +
         `<span class="ival">${v || 0}%</span></div>`).join('');
       const ag = col.querySelector('.iagents');
-      ag.textContent = (x.top_agents && x.top_agents.length)
-        ? 'top: ' + x.top_agents.map(([a, p]) => `${a} ${p}%`).join(' · ') : '';
+      ag.textContent = (x.top_agents && x.top_agents.length)   // names only — the
+        ? 'top: ' + x.top_agents.slice(0, 2).map(([a]) => a).join(' · ') : '';  // bars carry the numbers
     }
   }
 

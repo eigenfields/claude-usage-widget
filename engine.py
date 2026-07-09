@@ -78,10 +78,11 @@ CONFIG_TEMPLATE = """\
 logs_path =
 plan = max20x
 
-# credits (optional) : tunes the Fable usage-credits estimator gauge.
+# credits (optional) : tunes the Usage Credits estimator gauge.
 #   credits_cap       = your monthly usage-credits spend cap in dollars, e.g. 100
-#   credits_from      = the date Fable started billing usage credits for you
-#                       (YYYY-MM-DD; blank = start of the current credits month)
+#   credits_from      = the date Fable left your plan and started billing usage
+#                       credits (YYYY-MM-DD). BLANK = Fable is still included in
+#                       your plan, so it bills $0 here.
 #   credits_reset_day = day of month your credits reset (default 1)
 credits_cap =
 credits_from =
@@ -289,6 +290,8 @@ def insights(records, now):
 
 FABLE_ONLY = {"fable"}          # hypothesis A model set
 PREMIUM = {"fable", "opus"}     # hypothesis B model set
+OPUS_ONLY = {"opus"}
+INPLAN_NO_FABLE = set(PRICE) - {"fable"}   # the weekly bucket once Fable exits it
 
 
 # ---- the ONE config file -----------------------------------------------------
@@ -642,6 +645,69 @@ def update_day_ledger(store, records, from_utc, now_utc):
     return changed
 
 
+def _usd(x):
+    return f"${x:,.2f}" if x < 10 else f"${x:,.0f}"
+
+
+def _overage_credits(store, fits, wanchor, cp_start, now, today_comp, tzl, fable_from):
+    """Billing route (b): IN-PLAN overage — usage past the weekly all-models
+    budget bills usage credits at API rates. The boundary lives in
+    SUBSCRIPTION cost-equivalent (100/a of the calibrated week_all fit); the
+    dollars past it are re-priced at API_CR/API_CW, split per model family.
+
+    Day-granular over the day_comps ledger (+ live today): each day is split
+    across the (max two) weekly windows it wall-time overlaps, cumulative
+    subscription-cost walks each week, and the crossing segment is pro-rated
+    by overage fraction under a uniform-mix assumption — so every dollar this
+    returns is an ESTIMATE. From `fable_from`, Fable leaves the weekly bucket
+    (route (a) bills it in full instead), so it's excluded from both the
+    cumulative walk and the split here on those days.
+
+    Deliberately biased to UNDER-claim: session-cap crossings aren't modeled,
+    segments straddling the period start only count from inside it, and a
+    stale (promo-era) budget under-detects crossings. Skipped entirely — {} —
+    without a pinned weekly anchor and a MATURE fit (n>=3, the same threshold
+    that clears the est. badge): a boundary invented from tier defaults or a
+    single noisy reading must never bill anyone against it."""
+    fit = fits["week_all"]
+    if not wanchor or fit["n"] < 3 or fit["a"] <= 0:
+        return {}
+    budget = 100.0 / fit["a"]
+    led = store.get("day_comps", {})
+    today_l = now.astimezone(tzl).date()
+    w0, _, _ = weekly_window(cp_start, wanchor)
+
+    over = {}
+    cur_w, cum = None, 0.0
+    d = w0.astimezone(tzl).date()
+    while d <= today_l:
+        comp = today_comp if d == today_l else led.get(d.isoformat())
+        ds = datetime.combine(d, time(0, 0), tzinfo=tzl).astimezone(UTC)
+        de = datetime.combine(d + timedelta(days=1), time(0, 0), tzinfo=tzl).astimezone(UTC)
+        if d == today_l:
+            de = min(de, now)
+        if comp and de > ds:
+            mid = ds
+            while mid < de:
+                ws, we, _ = weekly_window(mid, wanchor)
+                if ws != cur_w:
+                    cur_w, cum = ws, 0.0
+                seg_end = min(de, we)
+                f = (seg_end - mid).total_seconds() / (de - ds).total_seconds()
+                fams = None if d < fable_from else INPLAN_NO_FABLE
+                sub = comp_cost(comp, keep=fams) * f
+                if sub > 0 and cum + sub > budget and mid >= cp_start:
+                    of = min(1.0, (cum + sub - budget) / sub)
+                    for fam in (comp if fams is None else fams & set(comp)):
+                        usd = comp_cost({fam: comp[fam]}, cr=API_CR, cw=API_CW) * f * of
+                        if usd > 0:
+                            over[fam] = over.get(fam, 0.0) + usd
+                cum += sub
+                mid = seg_end
+        d += timedelta(days=1)
+    return over
+
+
 # ---- window boundaries -------------------------------------------------------
 def weekly_window(now_utc, anchor=None):
     """(start, end, soft) of the weekly limit window. `anchor` (pinned by the
@@ -785,8 +851,12 @@ def compute_gauges(now=None, records=None):
     if cfg["credits_from"]:
         c_from = max(c_from, datetime.combine(cfg["credits_from"], time(0, 0),
                                               tzinfo=tzl).astimezone(UTC))
+    led_from = min(c_from, cp_start)
+    if store.get("week_anchor"):
+        w0, _, _ = weekly_window(cp_start, store["week_anchor"])
+        led_from = min(led_from, w0)   # overage math needs the week straddling the period start
     led = store.get("day_comps", {})
-    dmiss = c_from.astimezone(tzl).date()
+    dmiss = led_from.astimezone(tzl).date()
     today_l = now.astimezone(tzl).date()
     while dmiss < today_l and dmiss.isoformat() in led:
         dmiss += timedelta(days=1)
@@ -795,7 +865,7 @@ def compute_gauges(now=None, records=None):
     if records is None:
         records, _, _ = load_records(logs, since)
     quarantined = ingest_pastes(cfg, records, store)
-    if update_day_ledger(store, records, c_from, now):
+    if update_day_ledger(store, records, led_from, now):
         save_points(store)
     fits = fits_from(store, cfg["plan"])
 
@@ -808,50 +878,70 @@ def compute_gauges(now=None, records=None):
             anchor = None
     w_st, w_end, w_soft = weekly_window(now, store.get("week_anchor"))
     s_st, s_end, s_soft = session_window(now, records, anchor)
-    keep_fable = is_fable_strict if FABLE_HYP == "A" else is_premium
     cost_sess = cost_over(records, s_st, now) if s_st else 0.0
     cost_all = cost_over(records, w_st, now)
-    cost_fable = cost_over(records, w_st, now, keep=keep_fable)
-    fkey = "week_fable_A" if FABLE_HYP == "A" else "week_fable_B"
+    # Weekly Opus = Opus's share of the SAME calibrated all-models budget.
+    # /usage prints no opus% line, so there is no Opus-specific denominator to
+    # fit — inventing one would be fake precision. Post-2026-07-12 (Fable off
+    # the bucket) this intentionally tracks close to the Week gauge.
+    cost_opus = cost_over(records, w_st, now, keep=lambda m: fam_name(m) == "opus")
     sp, _, spv = _predict(cost_sess, fits["session"])
     ap, _, apv = _predict(cost_all, fits["week_all"])
-    fp, _, fpv = _predict(cost_fable, fits[fkey])
-    sp, ap, fp = round(sp), round(ap), round(fp)
+    op, _, opv = _predict(cost_opus, fits["week_all"])   # reuse calibrated fit
+    sp, ap, op = round(sp), round(ap), round(op)
     # ghost arc = burn-rate projection to the window's reset (None if too early)
     s_proj = _project(sp, s_st, s_end, now)
     w_proj = _project(ap, w_st, w_end, now)
-    f_proj = _project(fp, w_st, w_end, now)
+    o_proj = _project(op, w_st, w_end, now)
 
     def _danger(pt, proj):
         return bool((proj is not None and proj >= 90) or pt > 100)
 
     week_reset = _fmt_week(w_end) if w_end else "unknown"
 
-    # ---- Fable usage-credits estimate: month-to-date, priced at API rates ----
-    cred = 0.0
-    dd = c_from.astimezone(tzl).date()
-    while dd < today_l:
-        c = store.get("day_comps", {}).get(dd.isoformat())
-        if c:
-            cred += comp_cost(c, keep=FABLE_ONLY, cr=API_CR, cw=API_CW)
-        dd += timedelta(days=1)
-    live_from = max(c_from, datetime.combine(today_l, time(0, 0), tzinfo=tzl).astimezone(UTC))
-    if live_from < now:
-        cred += comp_cost(comp_over(records, live_from, now),
-                          keep=FABLE_ONLY, cr=API_CR, cw=API_CW)
+    # ---- usage credits: (a) excluded-model billing + (b) in-plan overage ----
+    # (a) From credits_from, EVERY Fable token bills credits at API rates —
+    #     Fable leaves the subscription bucket per the announced terms. A blank
+    #     credits_from means Fable is still in-plan: route (a) bills $0 (never
+    #     charge someone for included usage). The date lives in config, not
+    #     code (Q3): confirm it against your first real post-switch /usage.
+    today_start = datetime.combine(today_l, time(0, 0), tzinfo=tzl).astimezone(UTC)
+    today_comp = comp_over(records, today_start, now)
+    fable_usd = 0.0
+    if cfg["credits_from"]:
+        f_start = max(cp_start, datetime.combine(cfg["credits_from"], time(0, 0),
+                                                 tzinfo=tzl).astimezone(UTC))
+        dd = f_start.astimezone(tzl).date()
+        while dd < today_l:
+            c = store.get("day_comps", {}).get(dd.isoformat())
+            if c:
+                fable_usd += comp_cost(c, keep=FABLE_ONLY, cr=API_CR, cw=API_CW)
+            dd += timedelta(days=1)
+        if f_start <= today_start:
+            fable_usd += comp_cost(today_comp, keep=FABLE_ONLY, cr=API_CR, cw=API_CW)
+    # (b) usage past the weekly budget while in-plan (est., under-claims)
+    over = _overage_credits(store, fits, store.get("week_anchor"), cp_start, now,
+                            today_comp, tzl, cfg["credits_from"] or date.max)
+    over = {fam: v for fam, v in over.items() if v >= 0.005}
+    fable_over = over.pop("fable", 0.0)
+    cred = fable_usd + fable_over + sum(over.values())
+    breakout = []
+    if fable_usd + fable_over > 0:
+        breakout.append(["Fable", ("~" if fable_over > 0 else "") + _usd(fable_usd + fable_over)])
+    for fam, v in sorted(over.items(), key=lambda kv: -kv[1]):
+        breakout.append([fam.title(), "~" + _usd(v)])
+    any_est = bool(fable_over > 0 or over)
     cap = cfg["credits_cap"]
     c_pt = round(min(100.0, 100.0 * cred / cap)) if cap else 0
     c_proj = None
-    if cap and now > c_from:
-        fr = (now - c_from).total_seconds() / (cp_end - c_from).total_seconds()
+    if cap:
+        fr = (now - cp_start).total_seconds() / (cp_end - cp_start).total_seconds()
         if 0.08 <= fr < 1.0 and cred > 0:
             p = round(100.0 * (cred / fr) / cap)
             c_proj = min(p, 200) if p > c_pt else None
     c_danger = bool(cap and (cred >= cap or (c_proj or 0) >= 90))
-    dollars = f"${cred:,.2f}" if cred < 10 else f"${cred:,.0f}"
+    dollars = _usd(cred)
     cp_end_l = cp_end.astimezone(tzl)
-
-    plabel = ((store.get("premium_label") or "fable").strip().title() or "Fable")
     req7 = sum(1 for r in records if r["ts"] >= now - timedelta(days=7))
     lu = now.astimezone(local_tz())
     h12 = lu.hour % 12 or 12
@@ -877,14 +967,18 @@ def compute_gauges(now=None, records=None):
              # the window is the trailing 7d (an over-count) and the reset unknown.
              "point": ap, "projected": w_proj, "danger": _danger(ap, w_proj),
              "provisional": apv or w_soft, "reset": week_reset},
-            {"key": "week_fable", "label": plabel, "sub": "weekly",
-             "point": fp, "projected": f_proj, "danger": _danger(fp, f_proj),
-             "provisional": fpv or w_soft, "reset": week_reset},
-            # always provisional: real credit billing is invisible locally — this
-            # prices the local token record at API rates (a floor, like the rest)
-            {"key": "credits", "label": "Credits", "sub": "Fable, monthly",
+            {"key": "week_opus", "label": "Opus", "sub": "weekly",
+             "point": op, "projected": o_proj, "danger": _danger(op, o_proj),
+             "provisional": opv or w_soft, "reset": week_reset},
+            # always provisional: real credit billing is invisible locally.
+            # In-plan usage reads $0 by construction — only excluded-model
+            # (Fable) billing and estimated over-limit crossings land here.
+            {"key": "credits", "label": "Usage Credits",
+             "sub": (" · ".join(f"{n} {v}" for n, v in breakout) +
+                     (" est." if any_est else "")) if breakout else "in plan — no overage",
              "point": c_pt, "projected": c_proj, "danger": c_danger,
              "provisional": True, "dollars": dollars, "cap": cap,
+             "breakout": breakout, "any_est": any_est,
              "reset": f"{MON[cp_end_l.month-1]} {cp_end_l.day}"},
         ],
         "n_snapshots": len(store["points"]),
