@@ -9,27 +9,67 @@
     "model id matches no versioned key. Refreshed by tools/refresh_pricing.py",
     "via a REVIEWED weekly PR - the widget itself never touches the network."
   ],
-  "cache_multipliers": { "write": 1.25, "read": 0.10 },
+  "cache_multipliers": {
+    "write": 1.25,
+    "read": 0.1
+  },
   "models": {
-    "fable-5":    { "input": 10, "output": 50 },
-    "mythos-5":   { "input": 10, "output": 50 },
-    "opus-4-8":   { "input": 5,  "output": 25 },
-    "opus-4-7":   { "input": 5,  "output": 25 },
-    "opus-4-6":   { "input": 5,  "output": 25 },
-    "opus-4-5":   { "input": 5,  "output": 25 },
-    "opus-4-1":   { "input": 15, "output": 75 },
-    "sonnet-5":   [
-      { "until": "2026-08-31", "input": 2, "output": 10 },
-      { "input": 3, "output": 15 }
+    "fable-5": {
+      "input": 10,
+      "output": 50
+    },
+    "mythos-5": {
+      "input": 10,
+      "output": 50
+    },
+    "opus-4-8": {
+      "input": 5,
+      "output": 25
+    },
+    "opus-4-7": {
+      "input": 5,
+      "output": 25
+    },
+    "opus-4-6": {
+      "input": 5,
+      "output": 25
+    },
+    "opus-4-5": {
+      "input": 5,
+      "output": 25
+    },
+    "opus-4-1": {
+      "input": 15,
+      "output": 75
+    },
+    "sonnet-5": [
+      {
+        "until": "2026-08-31",
+        "input": 2,
+        "output": 10
+      },
+      {
+        "input": 3,
+        "output": 15
+      }
     ],
-    "sonnet-4-6": { "input": 3, "output": 15 },
-    "sonnet-4-5": { "input": 3, "output": 15 },
-    "haiku-4-5":  { "input": 1, "output": 5 }
+    "sonnet-4-6": {
+      "input": 3,
+      "output": 15
+    },
+    "sonnet-4-5": {
+      "input": 3,
+      "output": 15
+    },
+    "haiku-4-5": {
+      "input": 1,
+      "output": 5
+    }
   },
   "family_fallback": {
-    "fable":  "fable-5",
-    "opus":   "opus-4-8",
+    "fable": "fable-5",
+    "opus": "opus-4-8",
     "sonnet": "sonnet-5",
-    "haiku":  "haiku-4-5"
+    "haiku": "haiku-4-5"
   }
 }

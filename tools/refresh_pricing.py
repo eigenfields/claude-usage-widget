@@ -76,6 +76,47 @@ def open_entry(val):
     return val
 
 
+def active_dated(val, today):
+    """The dated period covering `today`, or None. While one is active the
+    page shows THAT price, so it says nothing about the standing rate."""
+    if not isinstance(val, list):
+        return None
+    for e in sorted((e for e in val if "until" in e), key=lambda x: x["until"]):
+        if today <= date.fromisoformat(e["until"]):
+            return e
+    return None
+
+
+def merge_rates(doc, rates, today):
+    """Fold parsed page rates into doc IN PLACE, per the merge contract.
+    Never touches the open entry of a model whose dated (promo) period is
+    active — caught live 2026-07-13, when the page's Sonnet 5 intro price
+    would have overwritten the standing 3/15 rate (the calibration ruler)."""
+    for key, (pin, pout) in sorted(rates.items()):
+        cur = doc["models"].get(key)
+        if cur is None:
+            print(f"  NEW model on page (left for human review, not added): {key} {pin}/{pout}")
+            continue
+        promo = active_dated(cur, today)
+        if promo is not None:
+            if (float(promo["input"]), float(promo["output"])) == (pin, pout):
+                print(f"  {key}: page shows the active dated rate {pin}/{pout} — "
+                      "standing rate left untouched")
+            else:
+                print(f"  {key}: page {pin}/{pout} matches NEITHER the active dated "
+                      f"rate nor anything else — left for human review")
+            continue
+        e = open_entry(cur)
+        if e is None:
+            print(f"  {key}: no open entry (dated-only) — skipped")
+            continue
+        if (float(e["input"]), float(e["output"])) != (pin, pout):
+            print(f"  {key}: {e['input']}/{e['output']} -> {pin}/{pout}")
+            e["input"], e["output"] = pin, pout
+        else:
+            print(f"  {key}: unchanged {pin}/{pout}")
+
+
 def sane(doc):
     errs = []
     models = doc.get("models", {})
@@ -107,20 +148,7 @@ def main():
         return 1
     print(f"parsed {len(rates)} model rates from {URL}")
 
-    for key, (pin, pout) in sorted(rates.items()):
-        cur = doc["models"].get(key)
-        if cur is None:
-            print(f"  NEW model on page (left for human review, not added): {key} {pin}/{pout}")
-            continue
-        e = open_entry(cur)
-        if e is None:
-            print(f"  {key}: no open entry (dated-only) — skipped")
-            continue
-        if (float(e["input"]), float(e["output"])) != (pin, pout):
-            print(f"  {key}: {e['input']}/{e['output']} -> {pin}/{pout}")
-            e["input"], e["output"] = pin, pout
-        else:
-            print(f"  {key}: unchanged {pin}/{pout}")
+    merge_rates(doc, rates, date.today())
 
     errs = sane(doc)
     if errs:
