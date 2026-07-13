@@ -97,8 +97,10 @@ Dollar figures price each model **version** at its **dated** list rate from
 [`pricing.json`](pricing.json) — Opus 4.1 bills 15/75, not the family's 5/25,
 and Sonnet 5's intro pricing ends when it ends. A weekly GitHub Action
 refreshes that file via a human-reviewed pull request (sanity-gated, never
-auto-merged); the widget itself still makes zero network calls, and a missing
-`pricing.json` just falls back to built-in standard rates. The subscription %
+auto-merged, and it never writes a live promo price into a model's standing
+rate — while a dated period is active, the page's price says nothing about
+the standing one); the widget itself still makes zero network calls, and a
+missing `pricing.json` just falls back to built-in standard rates. The subscription %
 gauges never use any of this — they keep a fixed family-level ruler so your
 calibration history stays comparable.
 
