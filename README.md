@@ -12,11 +12,11 @@ transcript logs already on your machine. Glance at a widget instead of typing
 
 > **Unofficial.** Not affiliated with or endorsed by Anthropic.
 
-![The widget](widget.png)
+![The widget](widget.jpg)
 
 Collapsed to the pill (header chevron), it sits in the corner of your eye:
 
-![The collapsed pill](pill.png)
+![The collapsed pill](pill.jpg)
 
 ## Why it's safe (and why it's an estimate)
 
