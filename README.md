@@ -1,9 +1,11 @@
 # Claude Usage Widget
 
 An always-on-top desktop gauge for **Claude Code** usage — Session · Week ·
-weekly Opus share, plus a **Usage Credits estimator** (what you're plausibly
-being billed *past* your plan, at real API rates, against your monthly cap)
-and a compact strip of local behavior insights (requests, sessions, subagent /
+the weekly **Fable sub-cap** (Fable is included for up to 50% of your weekly
+limit; this dial pegging red is the moment further Fable use starts billing
+credits), plus a **Usage Credits estimator** (what you're plausibly being
+billed *past* your plan, at real API rates, against your monthly cap) and a
+compact strip of local behavior insights (requests, sessions, subagent /
 big-context / long-session shares). All of it estimated entirely from the
 transcript logs already on your machine. Glance at a widget instead of typing
 `/usage`.
@@ -88,12 +90,14 @@ window math is UTC-absolute (DST-safe).
 Usage credits are what you pay **past** your plan's included allowance, at
 standard API rates — in-plan usage costs $0 at the margin and reads as $0 here,
 on every tier. The dial estimates two billing routes for the current credits
-month: **excluded-model billing** (once Fable leaves your plan — set
-`credits_from` to that date; blank means it's still included and bills $0) and
-**in-plan overage** (usage past your calibrated weekly budget, re-priced at API
-rates — computed day-by-day, marked `~`, and deliberately under-claiming: it
-never invents a boundary from uncalibrated defaults and doesn't model
-session-cap crossings). The subtitle breaks the total out per model, `est.`
+month: **excluded-model billing** (if a model ever leaves your plan — set
+`credits_from` to that date; blank means everything's still included and bills
+$0) and **in-plan overage** (usage past your calibrated boundaries — the
+overall weekly budget *and* Fable's 50% sub-cap, past which continued Fable
+use bills credits — re-priced at API rates, computed day-by-day, marked `~`,
+and deliberately under-claiming: it never invents a boundary from
+uncalibrated defaults, never bills a token against both boundaries, and
+doesn't model session-cap crossings). The subtitle breaks the total out per model, `est.`
 where estimated. `credits_cap` fills the dial and drives the projection;
 `credits_reset_day` defaults to the 1st. Always badged `est.` — real billing
 isn't visible locally; this is a floor-side estimate, never a bill. Past days

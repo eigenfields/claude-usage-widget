@@ -60,12 +60,14 @@ FIT_WINDOW = 12
 
 # Zero-paste fallback scales (% per cost-equivalent $) so the widget shows a
 # sane provisional number straight after download. Derived from one calibrated
-# Max-20x account (n=11/12 fit under the CR=0.01 weights, 2026-07-07); other
-# tiers scaled by their limit ratio vs 20x (Max 5x = 1/4 the budget, Pro =
-# 1/20). The first real /usage paste replaces these with the account's own fit.
+# Max-20x account (n=12 fits, re-derived 2026-07-13 under the corrected
+# snapshot dedup — costs are ~18% higher than keep-first, so these are lower
+# than the 2026-07-07 originals); other tiers scaled by their limit ratio vs
+# 20x (Max 5x = 1/4 the budget, Pro = 1/20). The first real /usage paste
+# replaces these with the account's own fit.
 TIER_MULT = {"max20x": 1.0, "max5x": 4.0, "pro": 20.0}
-BASE_A = {"session": 0.6681, "week_all": 0.1153,
-          "week_fable_A": 0.3365, "week_fable_B": 0.1608}
+BASE_A = {"session": 0.6268, "week_all": 0.0939,
+          "week_fable_A": 0.2555, "week_fable_B": 0.1312}
 
 CONFIG_TEMPLATE = """\
 # Claude Usage Widget - config (the only file you ever edit)
@@ -421,7 +423,6 @@ def insights(records, now):
 
 FABLE_ONLY = {"fable"}          # hypothesis A model set
 PREMIUM = {"fable", "opus"}     # hypothesis B model set
-INPLAN_NO_FABLE = set(PRICE) - {"fable"}   # the weekly bucket once Fable exits it
 
 
 # ---- the ONE config file -----------------------------------------------------
@@ -795,35 +796,49 @@ def _usd(x):
 
 
 def _overage_credits(store, fits, wanchor, cp_start, now, today_comp, tzl, fable_from):
-    """Billing route (b): IN-PLAN overage — usage past the weekly all-models
-    budget bills usage credits at API rates. The boundary lives in
-    SUBSCRIPTION cost-equivalent (100/a of the calibrated week_all fit); the
-    dollars past it are re-priced at API_CR/API_CW, split per model family.
+    """Billing route (b): usage credits accrued by crossing IN-PLAN boundaries.
+    Two boundaries, each in SUBSCRIPTION cost-equivalent, each armed only with
+    a pinned weekly anchor + a MATURE fit (n>=3, the est.-badge bar — a
+    boundary invented from tier defaults or one noisy reading must never bill
+    anyone against it):
+
+      - the FABLE SUB-CAP: /usage's "Current week (Fable)" line tops out at
+        50% of the weekly limit, and Fable past it keeps working via usage
+        credits (permanent Max terms, 2026-07-13). Boundary = 100/a of the
+        week_fable_A fit, walked over Fable-only cost.
+      - the OVERALL weekly limit: everything past 100/a of the week_all fit.
+
+    Fable beyond its sub-cap is billing credits, not drawing the plan — so
+    the pool walk counts Fable only UP TO the cap. The clamp is also what
+    guarantees no token is ever billed by both legs. Without a mature Fable
+    fit the clamp is unknowable and Fable draws the pool in full (the old
+    behavior, still a floor). From `fable_from` (route (a) active) Fable
+    leaves BOTH legs — excluded-model billing owns it entirely.
 
     Day-granular over the day_comps ledger (+ live today): each day is split
     across the (max two) weekly windows it wall-time overlaps, cumulative
-    subscription-cost walks each week, and the crossing segment is pro-rated
-    by overage fraction under a uniform-mix assumption — so every dollar this
-    returns is an ESTIMATE. From `fable_from`, Fable leaves the weekly bucket
-    (route (a) bills it in full instead), so it's excluded from both the
-    cumulative walk and the split here on those days.
-
-    Deliberately biased to UNDER-claim: session-cap crossings aren't modeled,
-    segments straddling the period start only count from inside it, and a
-    stale (promo-era) budget under-detects crossings. Skipped entirely — {} —
-    without a pinned weekly anchor and a MATURE fit (n>=3, the same threshold
-    that clears the est. badge): a boundary invented from tier defaults or a
-    single noisy reading must never bill anyone against it."""
-    fit = fits["week_all"]
-    if not wanchor or fit["n"] < 3 or fit["a"] <= 0:
+    cost walks each week, crossing segments pro-rate by overage fraction
+    under a uniform-mix assumption, and dollars past a boundary re-price at
+    API rates per family — every figure an ESTIMATE, deliberately biased to
+    UNDER-claim (session-cap crossings unmodeled; segments straddling the
+    period start count only from inside it; stale budgets under-detect)."""
+    fw, ff = fits["week_all"], fits["week_fable_A"]
+    gen_on = bool(wanchor) and fw["n"] >= 3 and fw["a"] > 0
+    fab_on = bool(wanchor) and ff["n"] >= 3 and ff["a"] > 0
+    if not (gen_on or fab_on):
         return {}
-    budget = 100.0 / fit["a"]
+    bw = (100.0 / fw["a"]) if gen_on else None
+    bf = (100.0 / ff["a"]) if fab_on else None
     led = store.get("day_comps", {})
     today_l = now.astimezone(tzl).date()
     w0, _, _ = weekly_window(cp_start, wanchor)
 
     over = {}
-    cur_w, cum = None, 0.0
+    def bill(fam, usd):
+        if usd > 0:
+            over[fam] = over.get(fam, 0.0) + usd
+    cur_w = None
+    cum = cum_f = 0.0
     d = w0.astimezone(tzl).date()
     while d <= today_l:
         comp = today_comp if d == today_l else led.get(d.isoformat())
@@ -832,22 +847,33 @@ def _overage_credits(store, fits, wanchor, cp_start, now, today_comp, tzl, fable
         if d == today_l:
             de = min(de, now)
         if comp and de > ds:
+            fcomp = {fam: c for fam, c in comp.items() if fam == "fable"}
+            ocomp = {fam: c for fam, c in comp.items() if fam != "fable"}
             mid = ds
             while mid < de:
                 ws, we, _ = weekly_window(mid, wanchor)
                 if ws != cur_w:
-                    cur_w, cum = ws, 0.0
+                    cur_w, cum, cum_f = ws, 0.0, 0.0
                 seg_end = min(de, we)
                 f = (seg_end - mid).total_seconds() / (de - ds).total_seconds()
-                fams = None if d < fable_from else INPLAN_NO_FABLE
-                sub = comp_cost(comp, keep=fams) * f   # boundary walks in SUBSCRIPTION $
-                if sub > 0 and cum + sub > budget and mid >= cp_start:
-                    of = min(1.0, (cum + sub - budget) / sub)
-                    acr, acw = _api_weights()
-                    for fam in (comp if fams is None else fams & set(comp)):
-                        usd = comp_cost({fam: comp[fam]}, cr=acr, cw=acw, when=d) * f * of
-                        if usd > 0:
-                            over[fam] = over.get(fam, 0.0) + usd
+                acr, acw = _api_weights()
+                f_sub = comp_cost(fcomp) * f if d < fable_from else 0.0
+                o_sub = comp_cost(ocomp) * f
+                pool_f = f_sub                     # Fable's draw on the weekly pool
+                if fab_on and f_sub > 0:
+                    if cum_f + f_sub > bf and mid >= cp_start:
+                        of = min(1.0, (cum_f + f_sub - bf) / f_sub)
+                        bill("fable", comp_cost(fcomp, cr=acr, cw=acw, when=d) * f * of)
+                    pool_f = max(0.0, min(f_sub, bf - cum_f))
+                    cum_f += f_sub
+                sub = o_sub + pool_f
+                if gen_on and sub > 0 and cum + sub > bw and mid >= cp_start:
+                    of = min(1.0, (cum + sub - bw) / sub)
+                    for fam in ocomp:
+                        bill(fam, comp_cost({fam: comp[fam]}, cr=acr, cw=acw, when=d) * f * of)
+                    if pool_f > 0:                 # only Fable's plan-drawing share
+                        bill("fable", comp_cost(fcomp, cr=acr, cw=acw, when=d)
+                             * f * of * (pool_f / f_sub))
                 cum += sub
                 mid = seg_end
         d += timedelta(days=1)
@@ -1033,26 +1059,33 @@ def compute_gauges(now=None, records=None):
     s_st, s_end, s_soft = session_window(now, records, anchor)
     cost_sess = cost_over(records, s_st, now) if s_st else 0.0
     cost_all = cost_over(records, w_st, now)
-    # Weekly Opus = Opus's share of the SAME calibrated all-models budget.
-    # /usage prints no opus% line, so there is no Opus-specific denominator to
-    # fit — inventing one would be fake precision. Post-2026-07-12 (Fable off
-    # the bucket) this intentionally tracks close to the Week gauge.
-    cost_opus = cost_over(records, w_st, now, keep=lambda m: fam_name(m) == "opus")
+    # Weekly Fable = the /usage "Current week (Fable)" line: Fable is capped at
+    # 50% of the weekly limit (permanent Max terms, 2026-07-13) and that line
+    # tops out AT the cap — so 100% here means the sub-cap is hit and further
+    # Fable use bills usage credits (route (b) models exactly that boundary).
+    # Unlike the retired Opus gauge, this one has a REAL fitted denominator
+    # (week_fable_A pairs Fable-only cost against the pasted line), so its own
+    # floor is legitimately Fable-specific and stays.
+    cost_fable = cost_over(records, w_st, now, keep=lambda m: fam_name(m) == "fable")
     sp, _, spv = _predict(cost_sess, fits["session"])
     ap, _, apv = _predict(cost_all, fits["week_all"])
-    # Reuse the calibrated week_all SCALE but not its floor: the floor is the
-    # fit's unseen ALL-models baseline, and adding it to an Opus-only cost
-    # would overstate Opus — the one way this gauge could breach floor
-    # semantics. Zeroing it under-claims instead, consistent with the ethic.
-    op, _, opv = _predict(cost_opus, {**fits["week_all"], "floor": 0.0})
-    sp, ap, op = round(sp), round(ap), round(op)
+    fp, _, fpv = _predict(cost_fable, fits["week_fable_A"])
+    sp, ap, fp = round(sp), round(ap), round(fp)
     if s_st is None:
         sp = 0          # idle: no active window — showing the fit's floor as a
                         # "current session %" would be a % of nothing
     # ghost arc = burn-rate projection to the window's reset (None if too early)
     s_proj = _project(sp, s_st, s_end, now)
     w_proj = _project(ap, w_st, w_end, now)
-    o_proj = _project(op, w_st, w_end, now)
+    f_proj = _project(fp, w_st, w_end, now)
+    # gauge 3's name follows what /usage itself calls the sub-capped line
+    # (stored per point) — never hardcode a brand the account doesn't show.
+    prem_label = "Fable"
+    for p in reversed(store["points"]):
+        lb = ((p.get("week") or {}).get("label") or "").strip()
+        if lb:
+            prem_label = lb.title()
+            break
 
     def _danger(pt, proj):
         # >= not >: _predict clamps to 100, so a pegged gauge must read as red
@@ -1137,9 +1170,10 @@ def compute_gauges(now=None, records=None):
              # the window is the trailing 7d (an over-count) and the reset unknown.
              "point": ap, "projected": w_proj, "danger": _danger(ap, w_proj),
              "provisional": apv or w_soft, "reset": week_reset},
-            {"key": "week_opus", "label": "Opus", "sub": "weekly",
-             "point": op, "projected": o_proj, "danger": _danger(op, o_proj),
-             "provisional": opv or w_soft, "reset": week_reset},
+            # 100% = the 50%-of-weekly sub-cap; pegged red = credits territory.
+            {"key": "week_fable", "label": prem_label, "sub": "weekly sub-cap",
+             "point": fp, "projected": f_proj, "danger": _danger(fp, f_proj),
+             "provisional": fpv or w_soft, "reset": week_reset},
             # always provisional: real credit billing is invisible locally.
             # In-plan usage reads $0 by construction — only excluded-model
             # (Fable) billing and estimated over-limit crossings land here.

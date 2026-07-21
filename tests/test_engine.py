@@ -209,6 +209,59 @@ def test_sessionless_records_dont_collapse_into_one_phantom():
     assert ins["d1"]["req"] == 3               # but every request still counts
 
 
+# ---- route (b): the two credit boundaries and the no-double-billing clamp -------
+# Fixed stage: weeks anchor Mon 00:00 UTC (2026-07-13 is a Monday), one ledger
+# day Tue Jul 14, "now" Wed Jul 15 noon. Comps are fresh-tokens-only, so
+# subscription-$ and API-repriced-$ coincide under the hardcoded PRICE table
+# (fable 10/50, haiku 1/5) and the arithmetic is checkable by hand.
+WANCHOR = {"tz": "UTC", "weekday": 0, "hour": 0, "minute": 0}
+
+def _fit(a):
+    return {"a": a, "sigma": 0.5, "floor": 0.0, "n": 12}
+
+_OFF = {"a": 0.0, "sigma": None, "floor": 0.0, "n": 0}
+
+def _overage(day_fable_usd=0.0, day_other_usd=0.0, a_week=None, a_fable=None):
+    from datetime import date as _date
+    comp = {}
+    if day_fable_usd:
+        comp["fable"] = [int(day_fable_usd / 10.0 * 1_000_000), 0, 0, 0]
+    if day_other_usd:
+        comp["haiku"] = [int(day_other_usd / 1.0 * 1_000_000), 0, 0, 0]
+    fits = {"week_all": _fit(a_week) if a_week else _OFF,
+            "week_fable_A": _fit(a_fable) if a_fable else _OFF,
+            "session": _OFF, "week_fable_B": _OFF}
+    return engine._overage_credits(
+        store={"day_comps": {"2026-07-14": comp}},
+        fits=fits, wanchor=WANCHOR,
+        cp_start=datetime(2026, 7, 1, tzinfo=UTC),
+        now=datetime(2026, 7, 15, 12, 0, tzinfo=UTC),
+        today_comp={}, tzl=UTC, fable_from=_date.max)
+
+def test_fable_subcap_bills_only_beyond_its_boundary():
+    # Bf = 100/10 = $10; $20 of Fable -> $10 past the cap, general leg off
+    over = _overage(day_fable_usd=20, a_fable=10.0)
+    assert set(over) == {"fable"}
+    assert over["fable"] == pytest.approx(10.0)
+
+def test_capped_fable_cannot_push_the_weekly_pool_over():
+    # Bf=$10, Bw=100/6.25=$16: $20 Fable + $2 haiku. Unclamped the pool would
+    # see $22 > $16 and bill; clamped it sees 10+2=$12 -> only the sub-cap leg.
+    over = _overage(day_fable_usd=20, day_other_usd=2, a_week=6.25, a_fable=10.0)
+    assert set(over) == {"fable"}
+    assert over["fable"] == pytest.approx(10.0)
+
+def test_both_boundaries_never_bill_a_token_twice():
+    # Bf=$10, Bw=$5, $20 Fable only. Plan covers 0..5; 5..10 is general
+    # overage of pool-drawing Fable ($5 * clamp 10/20 share of the $20 comp
+    # -> $5); beyond-cap 10..20 is the sub-cap leg ($10). Total $15 < $20.
+    over = _overage(day_fable_usd=20, a_week=20.0, a_fable=10.0)
+    assert over["fable"] == pytest.approx(15.0)
+
+def test_no_mature_fit_no_boundary_no_billing():
+    assert _overage(day_fable_usd=500) == {}
+
+
 # ---- version+date price resolution ----------------------------------------------
 def test_resolver_version_beats_family(toy_pricing):
     assert engine.resolve_rate("claude-opus-4-1", None) == (15.0, 75.0)
